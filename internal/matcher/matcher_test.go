@@ -3,6 +3,7 @@ package matcher
 import (
 	"reflect"
 	"regexp"
+	"strings"
 	"testing"
 )
 
@@ -10,7 +11,7 @@ import (
 // -i/-w/-x) gets the byte-scanning fixedMatcher, not a compiled regexp —
 // this is the fast path New documents.
 func TestNew_DispatchesToFixedFastPath(t *testing.T) {
-	m, err := New(Options{Pattern: "hello.world", Fixed: true})
+	m, err := New(Options{Patterns: []string{"hello.world"}, Fixed: true})
 	if err != nil {
 		t.Fatalf("New() error: %v", err)
 	}
@@ -37,9 +38,9 @@ func TestNew_FixedWithModifiersUsesRegexEngine(t *testing.T) {
 		name string
 		opts Options
 	}{
-		{"fixed + ignore case", Options{Pattern: "a.b", Fixed: true, IgnoreCase: true}},
-		{"fixed + word regexp", Options{Pattern: "a.b", Fixed: true, WordRegexp: true}},
-		{"fixed + line regexp", Options{Pattern: "a.b", Fixed: true, LineRegexp: true}},
+		{"fixed + ignore case", Options{Patterns: []string{"a.b"}, Fixed: true, IgnoreCase: true}},
+		{"fixed + word regexp", Options{Patterns: []string{"a.b"}, Fixed: true, WordRegexp: true}},
+		{"fixed + line regexp", Options{Patterns: []string{"a.b"}, Fixed: true, LineRegexp: true}},
 	}
 
 	for _, tt := range tests {
@@ -61,7 +62,7 @@ func TestNew_FixedWithModifiersUsesRegexEngine(t *testing.T) {
 }
 
 func TestNew_InvalidRegexReturnsNilInterfaceAndError(t *testing.T) {
-	m, err := New(Options{Pattern: "(unclosed"})
+	m, err := New(Options{Patterns: []string{"(unclosed"}})
 	if err == nil {
 		t.Fatal("expected an error for an unbalanced regex, got nil")
 	}
@@ -69,6 +70,103 @@ func TestNew_InvalidRegexReturnsNilInterfaceAndError(t *testing.T) {
 	// equal to nil, not be a non-nil interface wrapping a nil pointer.
 	if m != nil {
 		t.Fatalf("expected a nil Matcher on error, got %#v", m)
+	}
+}
+
+// --- multi-pattern (-e/-f) ---------------------------------------------
+
+// TestNew_EmptyPatternsNeverMatches is the regression test for the one
+// genuinely surprising piece of -e/-f behavior verified directly against
+// real GNU grep: an empty Patterns slice (e.g. -f on an empty file with
+// no -e at all) matches *nothing*, not "matches every line" the way
+// compiling a literal empty-string regex would.
+func TestNew_EmptyPatternsNeverMatches(t *testing.T) {
+	m, err := New(Options{Patterns: nil})
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+	for _, line := range [][]byte{[]byte(""), []byte("anything")} {
+		if got := m.Find(line); got != nil {
+			t.Errorf("Find(%q) = %v, want nil (zero patterns must never match)", line, got)
+		}
+	}
+}
+
+func TestNew_MultiplePatternsOrTogether(t *testing.T) {
+	m, err := New(Options{Patterns: []string{"cat", "dog"}})
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+	if got := m.Find([]byte("the cat sat")); got == nil {
+		t.Error("Find(\"the cat sat\") = nil, want a match on \"cat\"")
+	}
+	if got := m.Find([]byte("the dog ran")); got == nil {
+		t.Error("Find(\"the dog ran\") = nil, want a match on \"dog\"")
+	}
+	if got := m.Find([]byte("the fish swam")); got != nil {
+		t.Errorf("Find(\"the fish swam\") = %v, want nil", got)
+	}
+}
+
+// TestNew_MultiplePatternsFixedTreatsEachAsLiteral verifies -F applies to
+// every pattern in the list individually, not just the first — verified
+// directly against real GNU grep (`grep -F -e "a.b" -e "date"`).
+func TestNew_MultiplePatternsFixedTreatsEachAsLiteral(t *testing.T) {
+	m, err := New(Options{Patterns: []string{"a.b", "date"}, Fixed: true})
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+	if got := m.Find([]byte("aXb")); got != nil {
+		t.Errorf("Find(\"aXb\") = %v, want nil (dot must stay literal under -F)", got)
+	}
+	if got := m.Find([]byte("a.b")); got == nil {
+		t.Error("Find(\"a.b\") = nil, want a literal match")
+	}
+	if got := m.Find([]byte("update")); got == nil {
+		t.Error("Find(\"update\") = nil, want a match on the literal \"date\"")
+	}
+}
+
+// TestNew_MultiplePatternsWithLineRegexp verifies -x anchors the whole
+// alternation, requiring the entire line to equal *some* pattern in the
+// list — verified directly against real GNU grep (`grep -x -e apple -e
+// cherry`).
+func TestNew_MultiplePatternsWithLineRegexp(t *testing.T) {
+	m, err := New(Options{Patterns: []string{"apple", "cherry"}, LineRegexp: true})
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+	if got := m.Find([]byte("apple")); got == nil {
+		t.Error("Find(\"apple\") = nil, want a whole-line match")
+	}
+	if got := m.Find([]byte("apple pie")); got != nil {
+		t.Errorf("Find(\"apple pie\") = %v, want nil (must match the whole line)", got)
+	}
+}
+
+// TestNew_MultiplePatternsWithWordRegexp verifies -w applies word
+// boundaries to the whole alternation — verified directly against real
+// GNU grep (`grep -w -e cat -e dog`).
+func TestNew_MultiplePatternsWithWordRegexp(t *testing.T) {
+	m, err := New(Options{Patterns: []string{"cat", "dog"}, WordRegexp: true})
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+	if got := m.Find([]byte("category error")); got != nil {
+		t.Errorf("Find(\"category error\") = %v, want nil (cat must be a whole word)", got)
+	}
+	if got := m.Find([]byte("a dog ran")); got == nil {
+		t.Error("Find(\"a dog ran\") = nil, want a whole-word match on \"dog\"")
+	}
+}
+
+func TestNew_MultiplePatternsInvalidRegexIsAttributedToItsOwnPattern(t *testing.T) {
+	_, err := New(Options{Patterns: []string{"valid", "(unclosed"}})
+	if err == nil {
+		t.Fatal("expected an error for the unbalanced second pattern, got nil")
+	}
+	if !strings.Contains(err.Error(), "(unclosed") {
+		t.Errorf("error = %q, want it to mention the specific bad pattern %q", err.Error(), "(unclosed")
 	}
 }
 

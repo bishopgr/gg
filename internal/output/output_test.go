@@ -181,6 +181,85 @@ func TestPrintBinaryMatch(t *testing.T) {
 	}
 }
 
+// --- context lines (-A/-B/-C) ---------------------------------------------
+
+func TestPrintContextLine_Plain(t *testing.T) {
+	got := render(Options{}, func(p *Printer) {
+		p.PrintContextLine("file.txt", 5, []byte("context text"), nil)
+	})
+	want := "context text\n"
+	if got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+func TestPrintContextLine_UsesDashSeparatorNotColon(t *testing.T) {
+	got := render(Options{ShowFilename: true, LineNumber: true}, func(p *Printer) {
+		p.PrintContextLine("file.txt", 5, []byte("context text"), nil)
+	})
+	want := "file.txt-5-context text\n"
+	if got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+func TestPrintContextLine_FilenameOnly(t *testing.T) {
+	got := render(Options{ShowFilename: true}, func(p *Printer) {
+		p.PrintContextLine("file.txt", 5, []byte("context text"), nil)
+	})
+	want := "file.txt-context text\n"
+	if got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+// TestPrintContextLine_HighlightsItsOwnRanges covers the -v+context
+// interaction: a line excluded from selection by -v (because it *did*
+// match) can still appear as context, and real GNU grep still
+// highlights that literal match when it does — verified directly
+// against it, not assumed.
+func TestPrintContextLine_HighlightsItsOwnRanges(t *testing.T) {
+	got := render(Options{Color: true}, func(p *Printer) {
+		p.PrintContextLine("f", 1, []byte("the cat sat"), []matcher.MatchRange{{Start: 4, End: 7}})
+	})
+	want := "the " + colorStart + "cat" + colorReset + " sat\n"
+	if got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+// TestPrintContextLine_OnlyMatchingSuppressesItEntirely matches real GNU
+// grep's behavior: -o drops context line text even when -v gives it
+// ranges to highlight, rather than printing just the matched substring
+// the way a selected line under -o would.
+func TestPrintContextLine_OnlyMatchingSuppressesItEntirely(t *testing.T) {
+	got := render(Options{OnlyMatching: true}, func(p *Printer) {
+		p.PrintContextLine("f", 1, []byte("the cat sat"), []matcher.MatchRange{{Start: 4, End: 7}})
+	})
+	if got != "" {
+		t.Errorf("got %q, want empty output", got)
+	}
+}
+
+func TestPrintContextSeparator(t *testing.T) {
+	got := render(Options{}, func(p *Printer) { p.PrintContextSeparator() })
+	if got != "--\n" {
+		t.Errorf("got %q, want %q", got, "--\n")
+	}
+}
+
+// TestPrintContextSeparator_EmittedRegardlessOfOnlyMatching pins down
+// that the separator is a distinct call from PrintContextLine — verified
+// against real GNU grep, -o still prints "--" between non-adjacent
+// match groups even though it suppresses the context line text on
+// either side of it.
+func TestPrintContextSeparator_EmittedRegardlessOfOnlyMatching(t *testing.T) {
+	got := render(Options{OnlyMatching: true}, func(p *Printer) { p.PrintContextSeparator() })
+	if got != "--\n" {
+		t.Errorf("got %q, want %q", got, "--\n")
+	}
+}
+
 func TestFlush_IsRequiredForOutputToAppear(t *testing.T) {
 	var buf bytes.Buffer
 	p := New(&buf, Options{})

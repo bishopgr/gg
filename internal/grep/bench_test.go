@@ -52,14 +52,14 @@ func benchFixture(b *testing.B, n, hitEvery int) string {
 // formatted.
 func BenchmarkRun_Regex_SparseMatches(b *testing.B) {
 	path := benchFixture(b, 100_000, 500)
-	benchmarkRun(b, Options{Pattern: `needle-\w+-found`, Files: []string{path}})
+	benchmarkRun(b, Options{Patterns: []string{`needle-\w+-found`}, Files: []string{path}})
 }
 
 // BenchmarkRun_Fixed_SparseMatches is the -F counterpart, exercising
 // fixedMatcher's plain bytes.Index scan instead of regexp.
 func BenchmarkRun_Fixed_SparseMatches(b *testing.B) {
 	path := benchFixture(b, 100_000, 500)
-	benchmarkRun(b, Options{Pattern: "needle-pattern-found", Fixed: true, Files: []string{path}})
+	benchmarkRun(b, Options{Patterns: []string{"needle-pattern-found"}, Fixed: true, Files: []string{path}})
 }
 
 // BenchmarkRun_Quiet_FirstLineMatches measures the early-exit path
@@ -68,7 +68,7 @@ func BenchmarkRun_Fixed_SparseMatches(b *testing.B) {
 // actually stopping.
 func BenchmarkRun_Quiet_FirstLineMatches(b *testing.B) {
 	path := benchFixture(b, 100_000, 1) // every line matches, including the first
-	benchmarkRun(b, Options{Pattern: "needle-pattern-found", Quiet: true, Files: []string{path}})
+	benchmarkRun(b, Options{Patterns: []string{"needle-pattern-found"}, Quiet: true, Files: []string{path}})
 }
 
 func benchmarkRun(b *testing.B, opts Options) {

@@ -86,6 +86,42 @@ func (p *Printer) PrintLine(filename string, lineNo int, text []byte, ranges []m
 	p.w.WriteByte('\n')
 }
 
+// PrintContextLine writes one leading/trailing context line (-A/-B/-C):
+// a line included for proximity to a selected line, not because it was
+// itself selected. It uses '-' instead of ':' after the filename/line-
+// number prefix, matching GNU grep's own convention for telling context
+// output apart from an actual selected line.
+//
+// ranges highlights the line's own literal pattern occurrences, if any
+// — relevant specifically under -v, where a line excluded from
+// selection (because it *did* match) can still appear as context and,
+// verified directly against real GNU grep, still gets that match
+// highlighted when color is on.
+//
+// Under OnlyMatching (-o), this is a no-op: -o's entire point is
+// printing only matched substrings, and in normal (non-inverted) mode a
+// context line has none by definition; real grep drops context line
+// text under -o even when -v gives it ranges to highlight, so this
+// mirrors that unconditionally rather than special-casing -v here too.
+func (p *Printer) PrintContextLine(filename string, lineNo int, text []byte, ranges []matcher.MatchRange) {
+	if p.opts.OnlyMatching {
+		return
+	}
+	p.writeContextPrefix(filename, lineNo)
+	p.writeHighlighted(text, ranges)
+	p.w.WriteByte('\n')
+}
+
+// PrintContextSeparator writes the "--" line GNU grep uses to mark a
+// break between two non-adjacent groups of context/match output. It is
+// still emitted under -o — verified against real GNU grep — even though
+// -o suppresses the context line text on either side of it: the
+// separator reflects match-group adjacency, not what actually got
+// printed for that group.
+func (p *Printer) PrintContextSeparator() {
+	p.w.WriteString("--\n")
+}
+
 // PrintCount writes a per-file match count (-c): "filename:N\n" if
 // filenames are being shown, otherwise just "N\n".
 func (p *Printer) PrintCount(filename string, count int) {
@@ -117,6 +153,20 @@ func (p *Printer) writePrefix(filename string, lineNo int) {
 	}
 	if p.opts.LineNumber {
 		fmt.Fprintf(p.w, "%d:", lineNo)
+	}
+}
+
+// writeContextPrefix is writePrefix's context-line counterpart: same
+// shape, but with '-' separators instead of ':', matching GNU grep's
+// own convention for distinguishing context output from a selected
+// line's own filename/line-number prefix.
+func (p *Printer) writeContextPrefix(filename string, lineNo int) {
+	if p.opts.ShowFilename {
+		p.w.WriteString(filename)
+		p.w.WriteByte('-')
+	}
+	if p.opts.LineNumber {
+		fmt.Fprintf(p.w, "%d-", lineNo)
 	}
 }
 

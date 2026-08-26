@@ -79,6 +79,13 @@ type flags struct {
 	include              []string
 	exclude              []string
 	excludeDir           []string
+
+	afterContext  int // -A
+	beforeContext int // -B
+	context       int // -C
+
+	patternExprs []string // -e
+	patternFiles []string // -f
 }
 
 func newRootCmd(exitCode *int) *cobra.Command {
@@ -92,16 +99,76 @@ func newRootCmd(exitCode *int) *cobra.Command {
 		Version:       buildinfo.String(),
 		SilenceUsage:  true,
 		SilenceErrors: true,
-		Args:          cobra.MinimumNArgs(1),
+		// A bare PATTERN positional argument is required ONLY when
+		// neither -e nor -f was given — once either is present, every
+		// positional argument is a FILE instead (verified directly
+		// against real GNU grep: `grep -e pat somefile` searches
+		// somefile, it does not also treat somefile as a second
+		// pattern), so zero positional args is valid in that case
+		// (search stdin, same as today's plain `gg PATTERN` with no
+		// FILE). Checking cmd.Flags().Changed here — rather than a
+		// static cobra.MinimumNArgs(1) — is what makes that
+		// conditional requirement possible at all.
+		Args: func(cmd *cobra.Command, args []string) error {
+			if cmd.Flags().Changed("regexp") || cmd.Flags().Changed("file") {
+				return nil
+			}
+			return cobra.MinimumNArgs(1)(cmd, args)
+		},
 		RunE: func(cmd *cobra.Command, args []string) error {
 			colorMode, err := grep.ParseColorMode(f.color)
 			if err != nil {
 				return err
 			}
 
+			// Once -e/-f is used at all, PATTERN is no longer read from
+			// the first positional argument — every positional argument
+			// is a FILE instead, even one that "looks like" it was
+			// meant as a pattern. Verified directly against real GNU
+			// grep, not assumed; see the Args func above for the other
+			// half of this.
+			var patterns, files []string
+			if cmd.Flags().Changed("regexp") || cmd.Flags().Changed("file") {
+				patterns = f.patternExprs
+				files = args
+			} else {
+				patterns = []string{args[0]}
+				files = args[1:]
+			}
+
+			// -A/-B/-C precedence, verified directly against real GNU
+			// grep rather than assumed: an explicitly-given -A or -B
+			// always wins for its own direction, order-independent —
+			// e.g. "-A 1 -C 3" and "-C 3 -A 1" both resolve to after=1,
+			// before=3, not "last flag on the command line wins" the
+			// way most flag libraries (including pflag) default to for
+			// repeated/overlapping flags. Only the direction(s) not
+			// explicitly given fall back to -C's value.
+			after := f.afterContext
+			if !cmd.Flags().Changed("after-context") {
+				after = f.context
+			}
+			before := f.beforeContext
+			if !cmd.Flags().Changed("before-context") {
+				before = f.context
+			}
+			if after < 0 || before < 0 {
+				return fmt.Errorf("invalid context length argument")
+			}
+			// GNU grep enables "--" group separators between
+			// non-adjacent matches as soon as -A/-B/-C is given at all
+			// — even -A0/-C0, which print zero actual context lines but
+			// still separate non-contiguous matches. Verified directly:
+			// this is genuinely different output from not passing any
+			// context flag, not just an equivalent 0-value default.
+			contextEnabled := cmd.Flags().Changed("after-context") ||
+				cmd.Flags().Changed("before-context") ||
+				cmd.Flags().Changed("context")
+
 			opts := grep.Options{
-				Pattern: args[0],
-				Files:   args[1:],
+				Patterns:     patterns,
+				PatternFiles: f.patternFiles,
+				Files:        files,
 
 				Fixed:       f.fixedStrings,
 				IgnoreCase:  f.ignoreCase,
@@ -124,6 +191,10 @@ func newRootCmd(exitCode *int) *cobra.Command {
 				Include:        f.include,
 				Exclude:        f.exclude,
 				ExcludeDir:     f.excludeDir,
+
+				ContextEnabled: contextEnabled,
+				ContextBefore:  before,
+				ContextAfter:   after,
 			}
 
 			code, err := runGrep(cmd.Context(), opts)
@@ -188,6 +259,13 @@ func registerFlags(cmd *cobra.Command, f *flags) {
 	flagSet.StringArrayVar(&f.include, "include", nil, "search only files matching GLOB (may be repeated)")
 	flagSet.StringArrayVar(&f.exclude, "exclude", nil, "skip files matching GLOB (may be repeated)")
 	flagSet.StringArrayVar(&f.excludeDir, "exclude-dir", nil, "skip directories matching GLOB (may be repeated)")
+
+	flagSet.IntVarP(&f.afterContext, "after-context", "A", 0, "print NUM lines of trailing context after matching lines")
+	flagSet.IntVarP(&f.beforeContext, "before-context", "B", 0, "print NUM lines of leading context before matching lines")
+	flagSet.IntVarP(&f.context, "context", "C", 0, "print NUM lines of leading and trailing context (like -A NUM -B NUM, unless -A/-B is also given)")
+
+	flagSet.StringArrayVarP(&f.patternExprs, "regexp", "e", nil, "use PATTERN as a matching pattern (may be repeated); once given, every positional argument is a FILE instead")
+	flagSet.StringArrayVarP(&f.patternFiles, "file", "f", nil, "read patterns from FILE, one per line (may be repeated); \"-\" means stdin")
 
 	cmd.MarkFlagsMutuallyExclusive("files-with-matches", "files-without-match")
 	cmd.MarkFlagsMutuallyExclusive("no-filename", "with-filename")

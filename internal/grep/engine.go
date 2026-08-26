@@ -60,6 +60,11 @@ type engine struct {
 	printer *output.Printer
 	stderr  io.Writer
 
+	// context is non-nil only when Options.ContextEnabled is set, and is
+	// intentionally shared (not recreated) across every file searched in
+	// this run — see contextTracker's doc comment for why that matters.
+	context *contextTracker
+
 	hadMatch bool
 	hadError bool
 	stopped  bool // true once quiet mode's early exit has triggered
@@ -72,6 +77,9 @@ func (e *engine) searchStdin() {
 		return
 	}
 	defer rc.Close()
+	if e.context != nil {
+		e.context.startFile()
+	}
 	e.searchReader(stdinDisplayName, rc)
 }
 
@@ -117,6 +125,9 @@ func (e *engine) searchFile(path string) {
 		return
 	}
 	defer rc.Close()
+	if e.context != nil {
+		e.context.startFile()
+	}
 	e.searchReader(path, rc)
 }
 
@@ -148,13 +159,27 @@ func (e *engine) searchReader(displayName string, r io.Reader) {
 		}
 		lineNo++
 
-		ranges := e.matcher.Find(line.Text)
-		isMatch := len(ranges) > 0
+		// rawRanges is what the pattern literally matched on this line,
+		// independent of -v. It's kept separate from the (possibly
+		// nil'd-out) ranges used for the *selected* line's own
+		// highlighting because a line excluded by -v can still surface
+		// later as a context line (see the -v+-C interaction test) and
+		// must highlight its own literal matches when it does — verified
+		// directly against real grep, which does exactly this.
+		rawRanges := e.matcher.Find(line.Text)
+		isMatch := len(rawRanges) > 0
+		ranges := rawRanges
 		if e.opts.InvertMatch {
 			isMatch = !isMatch
 			ranges = nil // nothing to highlight: the line was selected for NOT matching
 		}
+
 		if !isMatch {
+			if e.context != nil && e.mode == modeNormal && !sniff.Binary {
+				if e.context.Skipped(lineNo, line.Text, rawRanges) {
+					e.printer.PrintContextLine(displayName, lineNo, line.Text, rawRanges)
+				}
+			}
 			continue
 		}
 
@@ -176,6 +201,15 @@ func (e *engine) searchReader(displayName string, r io.Reader) {
 					binaryReported = true
 				}
 				continue
+			}
+			if e.context != nil {
+				needSeparator, leading := e.context.Selected(lineNo)
+				if needSeparator {
+					e.printer.PrintContextSeparator()
+				}
+				for _, l := range leading {
+					e.printer.PrintContextLine(displayName, l.lineNo, l.text, l.ranges)
+				}
 			}
 			e.printer.PrintLine(displayName, lineNo, line.Text, ranges)
 		}

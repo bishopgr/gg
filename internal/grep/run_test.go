@@ -54,7 +54,7 @@ func TestRun_BasicMatch(t *testing.T) {
 	dir := t.TempDir()
 	path := mustWriteTempFile(t, dir, "a.txt", "hello\nworld\ngoodbye\n")
 
-	code, stdout, stderr, err := runCapture(t, Options{Pattern: "world", Files: []string{path}})
+	code, stdout, stderr, err := runCapture(t, Options{Patterns: []string{"world"}, Files: []string{path}})
 
 	if err != nil {
 		t.Fatalf("Run error: %v", err)
@@ -74,7 +74,7 @@ func TestRun_NoMatch(t *testing.T) {
 	dir := t.TempDir()
 	path := mustWriteTempFile(t, dir, "a.txt", "hello\nworld\n")
 
-	code, stdout, _, err := runCapture(t, Options{Pattern: "nonexistent", Files: []string{path}})
+	code, stdout, _, err := runCapture(t, Options{Patterns: []string{"nonexistent"}, Files: []string{path}})
 
 	if err != nil {
 		t.Fatalf("Run error: %v", err)
@@ -88,7 +88,7 @@ func TestRun_NoMatch(t *testing.T) {
 }
 
 func TestRun_InvalidPatternIsAFatalReturnedError(t *testing.T) {
-	code, _, stderr, err := runCapture(t, Options{Pattern: "(unclosed", Files: []string{"whatever"}})
+	code, _, stderr, err := runCapture(t, Options{Patterns: []string{"(unclosed"}, Files: []string{"whatever"}})
 
 	if code != ExitError {
 		t.Errorf("code = %d, want ExitError", code)
@@ -108,7 +108,7 @@ func TestRun_MissingFileIsReportedNotReturned(t *testing.T) {
 	dir := t.TempDir()
 	missing := filepath.Join(dir, "does-not-exist.txt")
 
-	code, stdout, stderr, err := runCapture(t, Options{Pattern: "x", Files: []string{missing}})
+	code, stdout, stderr, err := runCapture(t, Options{Patterns: []string{"x"}, Files: []string{missing}})
 
 	if code != ExitError {
 		t.Errorf("code = %d, want ExitError", code)
@@ -131,7 +131,7 @@ func TestRun_MultipleFilesShowFilenamePrefixInGivenOrder(t *testing.T) {
 	f1 := mustWriteTempFile(t, dir, "a.txt", "match\n")
 	f2 := mustWriteTempFile(t, dir, "b.txt", "match\n")
 
-	_, stdout, _, err := runCapture(t, Options{Pattern: "match", Files: []string{f1, f2}})
+	_, stdout, _, err := runCapture(t, Options{Patterns: []string{"match"}, Files: []string{f1, f2}})
 	if err != nil {
 		t.Fatalf("Run error: %v", err)
 	}
@@ -145,7 +145,7 @@ func TestRun_SingleFileHasNoFilenamePrefix(t *testing.T) {
 	dir := t.TempDir()
 	f1 := mustWriteTempFile(t, dir, "a.txt", "match\n")
 
-	_, stdout, _, err := runCapture(t, Options{Pattern: "match", Files: []string{f1}})
+	_, stdout, _, err := runCapture(t, Options{Patterns: []string{"match"}, Files: []string{f1}})
 	if err != nil {
 		t.Fatalf("Run error: %v", err)
 	}
@@ -158,7 +158,7 @@ func TestRun_WithFilenameForcesPrefixEvenForOneFile(t *testing.T) {
 	dir := t.TempDir()
 	f1 := mustWriteTempFile(t, dir, "a.txt", "match\n")
 
-	_, stdout, _, err := runCapture(t, Options{Pattern: "match", Files: []string{f1}, WithFilename: true})
+	_, stdout, _, err := runCapture(t, Options{Patterns: []string{"match"}, Files: []string{f1}, WithFilename: true})
 	if err != nil {
 		t.Fatalf("Run error: %v", err)
 	}
@@ -173,7 +173,7 @@ func TestRun_NoFilenameSuppressesPrefixEvenForMultipleFiles(t *testing.T) {
 	f1 := mustWriteTempFile(t, dir, "a.txt", "match\n")
 	f2 := mustWriteTempFile(t, dir, "b.txt", "match\n")
 
-	_, stdout, _, err := runCapture(t, Options{Pattern: "match", Files: []string{f1, f2}, NoFilename: true})
+	_, stdout, _, err := runCapture(t, Options{Patterns: []string{"match"}, Files: []string{f1, f2}, NoFilename: true})
 	if err != nil {
 		t.Fatalf("Run error: %v", err)
 	}
@@ -189,7 +189,7 @@ func TestRun_IgnoreCase(t *testing.T) {
 	dir := t.TempDir()
 	path := mustWriteTempFile(t, dir, "a.txt", "Hello World\n")
 
-	_, stdout, _, err := runCapture(t, Options{Pattern: "hello", Files: []string{path}, IgnoreCase: true})
+	_, stdout, _, err := runCapture(t, Options{Patterns: []string{"hello"}, Files: []string{path}, IgnoreCase: true})
 	if err != nil {
 		t.Fatalf("Run error: %v", err)
 	}
@@ -202,7 +202,7 @@ func TestRun_FixedStringTreatsMetacharactersLiterally(t *testing.T) {
 	dir := t.TempDir()
 	path := mustWriteTempFile(t, dir, "a.txt", "a.b\naxb\n")
 
-	_, stdout, _, err := runCapture(t, Options{Pattern: "a.b", Files: []string{path}, Fixed: true})
+	_, stdout, _, err := runCapture(t, Options{Patterns: []string{"a.b"}, Files: []string{path}, Fixed: true})
 	if err != nil {
 		t.Fatalf("Run error: %v", err)
 	}
@@ -215,7 +215,7 @@ func TestRun_WordRegexp(t *testing.T) {
 	dir := t.TempDir()
 	path := mustWriteTempFile(t, dir, "a.txt", "category\nthe cat sat\n")
 
-	_, stdout, _, err := runCapture(t, Options{Pattern: "cat", Files: []string{path}, WordRegexp: true})
+	_, stdout, _, err := runCapture(t, Options{Patterns: []string{"cat"}, Files: []string{path}, WordRegexp: true})
 	if err != nil {
 		t.Fatalf("Run error: %v", err)
 	}
@@ -228,7 +228,7 @@ func TestRun_LineRegexp(t *testing.T) {
 	dir := t.TempDir()
 	path := mustWriteTempFile(t, dir, "a.txt", "hello world\nhello\n")
 
-	_, stdout, _, err := runCapture(t, Options{Pattern: "hello", Files: []string{path}, LineRegexp: true})
+	_, stdout, _, err := runCapture(t, Options{Patterns: []string{"hello"}, Files: []string{path}, LineRegexp: true})
 	if err != nil {
 		t.Fatalf("Run error: %v", err)
 	}
@@ -241,7 +241,7 @@ func TestRun_InvertMatch(t *testing.T) {
 	dir := t.TempDir()
 	path := mustWriteTempFile(t, dir, "a.txt", "keep\nskip\nkeep\n")
 
-	code, stdout, _, err := runCapture(t, Options{Pattern: "skip", Files: []string{path}, InvertMatch: true})
+	code, stdout, _, err := runCapture(t, Options{Patterns: []string{"skip"}, Files: []string{path}, InvertMatch: true})
 	if err != nil {
 		t.Fatalf("Run error: %v", err)
 	}
@@ -259,7 +259,7 @@ func TestRun_LineNumber(t *testing.T) {
 	dir := t.TempDir()
 	path := mustWriteTempFile(t, dir, "a.txt", "no\nmatch\nno\nmatch\n")
 
-	_, stdout, _, err := runCapture(t, Options{Pattern: "match", Files: []string{path}, LineNumber: true})
+	_, stdout, _, err := runCapture(t, Options{Patterns: []string{"match"}, Files: []string{path}, LineNumber: true})
 	if err != nil {
 		t.Fatalf("Run error: %v", err)
 	}
@@ -272,7 +272,7 @@ func TestRun_OnlyMatching(t *testing.T) {
 	dir := t.TempDir()
 	path := mustWriteTempFile(t, dir, "a.txt", "cat and dog\n")
 
-	_, stdout, _, err := runCapture(t, Options{Pattern: "cat|dog", Files: []string{path}, OnlyMatching: true})
+	_, stdout, _, err := runCapture(t, Options{Patterns: []string{"cat|dog"}, Files: []string{path}, OnlyMatching: true})
 	if err != nil {
 		t.Fatalf("Run error: %v", err)
 	}
@@ -286,7 +286,7 @@ func TestRun_Count(t *testing.T) {
 	f1 := mustWriteTempFile(t, dir, "a.txt", "match\nno\nmatch\n")
 	f2 := mustWriteTempFile(t, dir, "b.txt", "no\nno\n")
 
-	code, stdout, _, err := runCapture(t, Options{Pattern: "match", Files: []string{f1, f2}, Count: true})
+	code, stdout, _, err := runCapture(t, Options{Patterns: []string{"match"}, Files: []string{f1, f2}, Count: true})
 	if err != nil {
 		t.Fatalf("Run error: %v", err)
 	}
@@ -304,7 +304,7 @@ func TestRun_FilesWithMatches(t *testing.T) {
 	f1 := mustWriteTempFile(t, dir, "a.txt", "match\n")
 	f2 := mustWriteTempFile(t, dir, "b.txt", "nope\n")
 
-	code, stdout, _, err := runCapture(t, Options{Pattern: "match", Files: []string{f1, f2}, FilesWithMatches: true})
+	code, stdout, _, err := runCapture(t, Options{Patterns: []string{"match"}, Files: []string{f1, f2}, FilesWithMatches: true})
 	if err != nil {
 		t.Fatalf("Run error: %v", err)
 	}
@@ -321,7 +321,7 @@ func TestRun_FilesWithoutMatch(t *testing.T) {
 	f1 := mustWriteTempFile(t, dir, "a.txt", "match\n")
 	f2 := mustWriteTempFile(t, dir, "b.txt", "nope\n")
 
-	code, stdout, _, err := runCapture(t, Options{Pattern: "match", Files: []string{f1, f2}, FilesWithoutMatch: true})
+	code, stdout, _, err := runCapture(t, Options{Patterns: []string{"match"}, Files: []string{f1, f2}, FilesWithoutMatch: true})
 	if err != nil {
 		t.Fatalf("Run error: %v", err)
 	}
@@ -348,7 +348,7 @@ func TestRun_FilesWithoutMatch_ExitCodeReflectsSelectionNotRawLineMatching(t *te
 	f1 := mustWriteTempFile(t, dir, "a.txt", "match\n")
 	f2 := mustWriteTempFile(t, dir, "b.txt", "match\n")
 
-	code, stdout, _, err := runCapture(t, Options{Pattern: "match", Files: []string{f1, f2}, FilesWithoutMatch: true})
+	code, stdout, _, err := runCapture(t, Options{Patterns: []string{"match"}, Files: []string{f1, f2}, FilesWithoutMatch: true})
 	if err != nil {
 		t.Fatalf("Run error: %v", err)
 	}
@@ -368,7 +368,7 @@ func TestRun_FilesWithMatches_ExitCodeReflectsSelectionNotRawLineMatching(t *tes
 	f1 := mustWriteTempFile(t, dir, "a.txt", "nope\n")
 	f2 := mustWriteTempFile(t, dir, "b.txt", "nope\n")
 
-	code, stdout, _, err := runCapture(t, Options{Pattern: "match", Files: []string{f1, f2}, FilesWithMatches: true})
+	code, stdout, _, err := runCapture(t, Options{Patterns: []string{"match"}, Files: []string{f1, f2}, FilesWithMatches: true})
 	if err != nil {
 		t.Fatalf("Run error: %v", err)
 	}
@@ -384,7 +384,7 @@ func TestRun_Quiet_NoOutputButCorrectExitCode(t *testing.T) {
 	dir := t.TempDir()
 	path := mustWriteTempFile(t, dir, "a.txt", "match\n")
 
-	code, stdout, stderr, err := runCapture(t, Options{Pattern: "match", Files: []string{path}, Quiet: true})
+	code, stdout, stderr, err := runCapture(t, Options{Patterns: []string{"match"}, Files: []string{path}, Quiet: true})
 	if err != nil {
 		t.Fatalf("Run error: %v", err)
 	}
@@ -405,7 +405,7 @@ func TestRun_Quiet_StopsSearchingAfterFirstMatch(t *testing.T) {
 	f1 := mustWriteTempFile(t, dir, "a.txt", "match\n")
 	f2 := filepath.Join(dir, "does-not-exist.txt")
 
-	code, stdout, stderr, err := runCapture(t, Options{Pattern: "match", Files: []string{f1, f2}, Quiet: true})
+	code, stdout, stderr, err := runCapture(t, Options{Patterns: []string{"match"}, Files: []string{f1, f2}, Quiet: true})
 	if err != nil {
 		t.Fatalf("Run error: %v", err)
 	}
@@ -428,7 +428,7 @@ func TestRun_RecursiveWalksSubdirectories(t *testing.T) {
 	mustWriteTempFile(t, dir, "top.txt", "no\n")
 	deep := mustWriteTempFile(t, sub, "deep.txt", "match\n")
 
-	code, stdout, _, err := runCapture(t, Options{Pattern: "match", Files: []string{dir}, Recursive: true})
+	code, stdout, _, err := runCapture(t, Options{Patterns: []string{"match"}, Files: []string{dir}, Recursive: true})
 	if err != nil {
 		t.Fatalf("Run error: %v", err)
 	}
@@ -445,7 +445,7 @@ func TestRun_NonRecursiveDirectoryReportsIsADirectory(t *testing.T) {
 	dir := t.TempDir()
 	mustWriteTempFile(t, dir, "a.txt", "match\n")
 
-	code, stdout, stderr, err := runCapture(t, Options{Pattern: "match", Files: []string{dir}})
+	code, stdout, stderr, err := runCapture(t, Options{Patterns: []string{"match"}, Files: []string{dir}})
 	if err != nil {
 		t.Fatalf("Run error: %v", err)
 	}
@@ -466,7 +466,7 @@ func TestRun_IncludeExcludeFilters(t *testing.T) {
 	mustWriteTempFile(t, dir, "skip.md", "match\n")
 
 	_, stdout, _, err := runCapture(t, Options{
-		Pattern:   "match",
+		Patterns:  []string{"match"},
 		Files:     []string{dir},
 		Recursive: true,
 		Include:   []string{"*.go"},
@@ -488,8 +488,8 @@ func TestRun_GlobExpansionOnFileArguments(t *testing.T) {
 	mustWriteTempFile(t, dir, "c.md", "match\n")
 
 	_, stdout, _, err := runCapture(t, Options{
-		Pattern: "match",
-		Files:   []string{filepath.Join(dir, "*.go")},
+		Patterns: []string{"match"},
+		Files:    []string{filepath.Join(dir, "*.go")},
 	})
 	if err != nil {
 		t.Fatalf("Run error: %v", err)
@@ -504,7 +504,7 @@ func TestRun_GlobExpansionOnFileArguments(t *testing.T) {
 func TestRun_DefaultsToStdinWhenNoFilesGiven(t *testing.T) {
 	withStdin(t, "hello\nworld\n")
 
-	code, stdout, _, err := runCapture(t, Options{Pattern: "world"})
+	code, stdout, _, err := runCapture(t, Options{Patterns: []string{"world"}})
 	if err != nil {
 		t.Fatalf("Run error: %v", err)
 	}
@@ -521,7 +521,7 @@ func TestRun_DashAmongFilesMeansStdin(t *testing.T) {
 	dir := t.TempDir()
 	f1 := mustWriteTempFile(t, dir, "a.txt", "from-file\n")
 
-	_, stdout, _, err := runCapture(t, Options{Pattern: "from", Files: []string{f1, "-"}})
+	_, stdout, _, err := runCapture(t, Options{Patterns: []string{"from"}, Files: []string{f1, "-"}})
 	if err != nil {
 		t.Fatalf("Run error: %v", err)
 	}
@@ -531,13 +531,105 @@ func TestRun_DashAmongFilesMeansStdin(t *testing.T) {
 	}
 }
 
+// --- multi-pattern (-e/-f) --------------------------------------------------
+
+func TestRun_MultiplePatternsFromLiteralList(t *testing.T) {
+	dir := t.TempDir()
+	path := mustWriteTempFile(t, dir, "a.txt", "cat\ndog\nfish\n")
+
+	code, stdout, _, err := runCapture(t, Options{Patterns: []string{"cat", "dog"}, Files: []string{path}})
+	if err != nil {
+		t.Fatalf("Run error: %v", err)
+	}
+	if code != ExitMatch {
+		t.Errorf("code = %d, want ExitMatch", code)
+	}
+	if stdout != "cat\ndog\n" {
+		t.Errorf("stdout = %q, want %q", stdout, "cat\ndog\n")
+	}
+}
+
+func TestRun_PatternsFromFile(t *testing.T) {
+	dir := t.TempDir()
+	target := mustWriteTempFile(t, dir, "a.txt", "cat\ndog\nfish\n")
+	patFile := mustWriteTempFile(t, dir, "patterns.txt", "cat\ndog\n")
+
+	_, stdout, _, err := runCapture(t, Options{PatternFiles: []string{patFile}, Files: []string{target}})
+	if err != nil {
+		t.Fatalf("Run error: %v", err)
+	}
+	if stdout != "cat\ndog\n" {
+		t.Errorf("stdout = %q, want %q", stdout, "cat\ndog\n")
+	}
+}
+
+func TestRun_PatternsFileAndLiteralCombine(t *testing.T) {
+	dir := t.TempDir()
+	target := mustWriteTempFile(t, dir, "a.txt", "cat\ndog\nfish\n")
+	patFile := mustWriteTempFile(t, dir, "patterns.txt", "dog\n")
+
+	_, stdout, _, err := runCapture(t, Options{
+		Patterns: []string{"cat"}, PatternFiles: []string{patFile}, Files: []string{target},
+	})
+	if err != nil {
+		t.Fatalf("Run error: %v", err)
+	}
+	if stdout != "cat\ndog\n" {
+		t.Errorf("stdout = %q, want %q", stdout, "cat\ndog\n")
+	}
+}
+
+// TestRun_MissingPatternFileIsFatalReturnedError mirrors
+// TestRun_InvalidPatternIsAFatalReturnedError: with no readable pattern
+// list, the whole command fails, and internal/cli's generic "gg: <err>"
+// handler is responsible for printing it — Run itself must not also
+// print a per-file diagnostic.
+func TestRun_MissingPatternFileIsFatalReturnedError(t *testing.T) {
+	dir := t.TempDir()
+	target := mustWriteTempFile(t, dir, "a.txt", "cat\n")
+	missing := filepath.Join(dir, "does-not-exist.txt")
+
+	code, _, stderr, err := runCapture(t, Options{PatternFiles: []string{missing}, Files: []string{target}})
+	if code != ExitError {
+		t.Errorf("code = %d, want ExitError", code)
+	}
+	if err == nil {
+		t.Error("err = nil, want a fatal error for a missing pattern file")
+	}
+	if stderr != "" {
+		t.Errorf("stderr = %q, want empty (fatal errors are returned, not self-reported)", stderr)
+	}
+}
+
+// TestRun_EmptyPatternFileWithNoLiteralPatternsNeverMatches is the
+// end-to-end regression test for the single most surprising piece of
+// -e/-f behavior, verified directly against real GNU grep: zero total
+// patterns means "match nothing," not "match everything" the way an
+// actually-empty regex pattern would.
+func TestRun_EmptyPatternFileWithNoLiteralPatternsNeverMatches(t *testing.T) {
+	dir := t.TempDir()
+	target := mustWriteTempFile(t, dir, "a.txt", "anything\nat all\n")
+	empty := mustWriteTempFile(t, dir, "empty.txt", "")
+
+	code, stdout, _, err := runCapture(t, Options{PatternFiles: []string{empty}, Files: []string{target}})
+	if err != nil {
+		t.Fatalf("Run error: %v", err)
+	}
+	if code != ExitNoMatch {
+		t.Errorf("code = %d, want ExitNoMatch", code)
+	}
+	if stdout != "" {
+		t.Errorf("stdout = %q, want empty", stdout)
+	}
+}
+
 // --- color -----------------------------------------------------------------
 
 func TestRun_ColorAlwaysForcesHighlightingEvenToANonFile(t *testing.T) {
 	dir := t.TempDir()
 	path := mustWriteTempFile(t, dir, "a.txt", "the cat sat\n")
 
-	_, stdout, _, err := runCapture(t, Options{Pattern: "cat", Files: []string{path}, Color: ColorAlways})
+	_, stdout, _, err := runCapture(t, Options{Patterns: []string{"cat"}, Files: []string{path}, Color: ColorAlways})
 	if err != nil {
 		t.Fatalf("Run error: %v", err)
 	}
@@ -554,7 +646,7 @@ func TestRun_ColorAutoDisabledForNonFileWriter(t *testing.T) {
 	dir := t.TempDir()
 	path := mustWriteTempFile(t, dir, "a.txt", "the cat sat\n")
 
-	_, stdout, _, err := runCapture(t, Options{Pattern: "cat", Files: []string{path}, Color: ColorAuto})
+	_, stdout, _, err := runCapture(t, Options{Patterns: []string{"cat"}, Files: []string{path}, Color: ColorAuto})
 	if err != nil {
 		t.Fatalf("Run error: %v", err)
 	}
@@ -573,7 +665,7 @@ func TestRun_BinaryFilePrintsMatchMessageNotRawLines(t *testing.T) {
 		t.Fatalf("WriteFile: %v", err)
 	}
 
-	code, stdout, _, err := runCapture(t, Options{Pattern: "needle", Files: []string{path}})
+	code, stdout, _, err := runCapture(t, Options{Patterns: []string{"needle"}, Files: []string{path}})
 	if err != nil {
 		t.Fatalf("Run error: %v", err)
 	}

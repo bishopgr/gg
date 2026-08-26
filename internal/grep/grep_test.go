@@ -10,7 +10,7 @@ func TestRun_CancelledContextReturnsErrorImmediately(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	code, err := Run(ctx, Options{Pattern: "x"})
+	code, err := Run(ctx, Options{Patterns: []string{"x"}})
 
 	if code != ExitError {
 		t.Errorf("code = %d, want ExitError", code)
@@ -28,7 +28,7 @@ func TestRun_ValidContextProceedsPastTheCheck(t *testing.T) {
 	dir := t.TempDir()
 	path := mustWriteTempFile(t, dir, "a.txt", "hello\n")
 
-	_, _, _, err := runCapture(t, Options{Pattern: "hello", Files: []string{path}})
+	_, _, _, err := runCapture(t, Options{Patterns: []string{"hello"}, Files: []string{path}})
 	if errors.Is(err, context.Canceled) {
 		t.Error("err should not be context.Canceled for a live context")
 	}

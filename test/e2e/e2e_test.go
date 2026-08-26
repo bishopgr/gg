@@ -234,3 +234,146 @@ func TestE2E_ColorAutoDoesNotEmitAnsiWhenRedirected(t *testing.T) {
 		t.Errorf("stdout = %q, want no ANSI codes when redirected under --color=auto", r.stdout)
 	}
 }
+
+// --- context lines (-A/-B/-C) ----------------------------------------------
+//
+// These pin down -A/-B/-C at the real process boundary — flag parsing
+// through Cobra, real stdio, real exit codes — on top of the already-
+// thorough in-process coverage in internal/grep and internal/cli.
+// Expected output was verified directly against real GNU grep (Git for
+// Windows' grep.exe) against identical input, not derived from the man
+// page.
+
+const ctxFixture = "line1\nline2\nMATCH_A\nline4\nline5\nline6\nMATCH_B\nline8\nline9\nline10\n"
+
+func TestE2E_ContextBeforeAndAfter(t *testing.T) {
+	r := run(t, ctxFixture, "-C", "2", "MATCH")
+	if r.exitCode != 0 {
+		t.Fatalf("exit code = %d, want 0; stderr=%q", r.exitCode, r.stderr)
+	}
+	want := "line1\nline2\nMATCH_A\nline4\nline5\nline6\nMATCH_B\nline8\nline9\n"
+	if r.stdout != want {
+		t.Errorf("stdout = %q, want %q", r.stdout, want)
+	}
+}
+
+func TestE2E_ContextSeparatorBetweenNonAdjacentMatches(t *testing.T) {
+	r := run(t, ctxFixture, "-A", "1", "MATCH")
+	if r.exitCode != 0 {
+		t.Fatalf("exit code = %d, want 0; stderr=%q", r.exitCode, r.stderr)
+	}
+	want := "MATCH_A\nline4\n--\nMATCH_B\nline8\n"
+	if r.stdout != want {
+		t.Errorf("stdout = %q, want %q", r.stdout, want)
+	}
+}
+
+// TestE2E_ContextExplicitZeroStillSeparates is the real-process proof of
+// the most surprising piece of this feature: -A0 is not the same as
+// omitting context entirely — it still separates non-adjacent matches
+// with "--", verified directly against real GNU grep.
+func TestE2E_ContextExplicitZeroStillSeparates(t *testing.T) {
+	r := run(t, ctxFixture, "-A0", "MATCH")
+	if r.exitCode != 0 {
+		t.Fatalf("exit code = %d, want 0; stderr=%q", r.exitCode, r.stderr)
+	}
+	want := "MATCH_A\n--\nMATCH_B\n"
+	if r.stdout != want {
+		t.Errorf("stdout = %q, want %q", r.stdout, want)
+	}
+}
+
+// TestE2E_ContextBeforeWinsOverContextRegardlessOfFlagOrder is the
+// real-process version of the -A/-B-over--C precedence rule internal/cli
+// implements — verified directly against real GNU grep, which resolves
+// "-C 3 -A 1" and "-A 1 -C 3" identically (after=1, before=3) rather
+// than letting whichever flag comes last on the command line win.
+func TestE2E_ContextBeforeWinsOverContextRegardlessOfFlagOrder(t *testing.T) {
+	want := "line1\nline2\nMATCH_A\nline4\n"
+
+	r1 := run(t, ctxFixture, "-A", "1", "-C", "3", "MATCH_A")
+	if r1.stdout != want {
+		t.Errorf("(-A 1 -C 3) stdout = %q, want %q", r1.stdout, want)
+	}
+
+	r2 := run(t, ctxFixture, "-C", "3", "-A", "1", "MATCH_A")
+	if r2.stdout != want {
+		t.Errorf("(-C 3 -A 1) stdout = %q, want %q", r2.stdout, want)
+	}
+}
+
+func TestE2E_ContextNegativeLengthExitsTwo(t *testing.T) {
+	r := run(t, ctxFixture, "-A", "-1", "MATCH")
+	if r.exitCode != 2 {
+		t.Errorf("exit code = %d, want 2", r.exitCode)
+	}
+}
+
+// --- multi-pattern (-e/-f) ----------------------------------------------
+//
+// Expected output verified directly against real GNU grep (Git for
+// Windows' grep.exe) against identical input.
+
+func TestE2E_RepeatedERegexpOrsPatternsTogether(t *testing.T) {
+	r := run(t, "apple\nbanana\ncherry\n", "-e", "apple", "-e", "cherry")
+	if r.exitCode != 0 {
+		t.Fatalf("exit code = %d, want 0; stderr=%q", r.exitCode, r.stderr)
+	}
+	want := "apple\ncherry\n"
+	if r.stdout != want {
+		t.Errorf("stdout = %q, want %q", r.stdout, want)
+	}
+}
+
+func TestE2E_PatternsFromFile(t *testing.T) {
+	dir := t.TempDir()
+	patFile := filepath.Join(dir, "patterns.txt")
+	if err := os.WriteFile(patFile, []byte("banana\ndate\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	r := run(t, "apple\nbanana\ncherry\ndate\n", "-f", patFile)
+	if r.exitCode != 0 {
+		t.Fatalf("exit code = %d, want 0; stderr=%q", r.exitCode, r.stderr)
+	}
+	want := "banana\ndate\n"
+	if r.stdout != want {
+		t.Errorf("stdout = %q, want %q", r.stdout, want)
+	}
+}
+
+// TestE2E_ERegexpMeansPositionalArgIsAFileNotAPattern is the real-
+// process proof of the precedence rule: once -e is given, a bare
+// positional argument that "looks like" a pattern is instead treated as
+// a FILE and, since it doesn't exist, reported as a missing-file error
+// — the pattern list is NOT silently extended with it.
+func TestE2E_ERegexpMeansPositionalArgIsAFileNotAPattern(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "f.txt")
+	if err := os.WriteFile(target, []byte("apple\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	r := run(t, "", "-e", "apple", "not-a-real-file", target)
+	if r.exitCode != 2 {
+		t.Errorf("exit code = %d, want 2 (the positional arg should be treated as a missing FILE)", r.exitCode)
+	}
+	if !strings.Contains(r.stderr, "not-a-real-file") {
+		t.Errorf("stderr = %q, want it to mention the missing file", r.stderr)
+	}
+	if !strings.Contains(r.stdout, "apple") {
+		t.Errorf("stdout = %q, want it to still contain the match from the real file", r.stdout)
+	}
+}
+
+// TestE2E_MissingPatternFileExitsTwoWithDiagnostic covers -f's own
+// error path at the real process boundary.
+func TestE2E_MissingPatternFileExitsTwoWithDiagnostic(t *testing.T) {
+	r := run(t, "", "-f", "does-not-exist-patterns.txt", "somefile.txt")
+	if r.exitCode != 2 {
+		t.Errorf("exit code = %d, want 2", r.exitCode)
+	}
+	if !strings.Contains(r.stderr, "No such file or directory") {
+		t.Errorf("stderr = %q, want it to mention the missing pattern file", r.stderr)
+	}
+}
