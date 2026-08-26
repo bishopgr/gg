@@ -4,6 +4,7 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"os"
 
@@ -18,15 +19,28 @@ import (
 // right fallback based on whether an error occurred.
 const unsetExitCode = -1
 
+// runGrep is the seam RunE calls through. It's a package-level var
+// (rather than grep.Run called directly) purely so tests can verify the
+// exit-code plumbing — including PROCESS.md §3.5's "must be 0/1/2
+// regardless of OS, and Cobra must not swallow that distinction"
+// requirement — for every code, without needing a real search engine
+// wired up yet. Production code never reassigns it.
+var runGrep = grep.Run
+
 // Execute builds and runs the root command for the given args (typically
 // os.Args[1:]) and returns the process exit code to use. Only main.go
 // calls os.Exit; no command logic below this does.
-func Execute(args []string) int {
+//
+// ctx is threaded through to grep.Run via Cobra's ExecuteContext/
+// cmd.Context() so Ctrl+C (PROCESS.md §3.5) can eventually trigger a
+// graceful stop once there's real work to cancel — see main.go, which
+// derives ctx from signal.NotifyContext.
+func Execute(ctx context.Context, args []string) int {
 	exitCode := unsetExitCode
 	root := newRootCmd(&exitCode)
 	root.SetArgs(args)
 
-	if err := root.Execute(); err != nil {
+	if err := root.ExecuteContext(ctx); err != nil {
 		fmt.Fprintln(os.Stderr, "gg:", err)
 		if exitCode == unsetExitCode {
 			return grep.ExitError // Cobra-level usage error; RunE never ran
@@ -55,7 +69,7 @@ func newRootCmd(exitCode *int) *cobra.Command {
 				Files:   args[1:],
 			}
 
-			code, err := grep.Run(opts)
+			code, err := runGrep(cmd.Context(), opts)
 			*exitCode = code
 			return err
 		},

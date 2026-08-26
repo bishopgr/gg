@@ -33,14 +33,17 @@ Legend: ✅ done + tested · 🚧 built, not wired in · ⬜ not started
 | Area | State | Notes |
 |---|---|---|
 | CLI scaffold (Cobra root command, `--version`, `--help`, usage errors) | ✅ | `internal/cli` |
-| Exit code contract (`0`/`1`/`2`) | ✅ | Verified for `--version`, `--help`, no-args, and the engine-stub error path |
+| Exit code contract (`0`/`1`/`2`) | ✅ | Now permanently regression-tested (was manual-only since scaffolding) via a swappable `runGrep` seam in `internal/cli` |
+| Ctrl+C / graceful shutdown context threading | ✅ | `signal.NotifyContext` in `main.go` → Cobra `ExecuteContext` → `grep.Run(ctx, opts)`; `Run` checks `ctx.Err()` eagerly. Nothing to gracefully flush yet — no output layer |
+| File opening (Windows-appropriate sharing semantics, "-" for stdin) | ✅ | `internal/source` — fixes a real gap: plain `os.Open` on Windows blocks concurrent rename/delete (e.g. log rotation); fixed via `FILE_SHARE_DELETE`, **not yet reachable from the CLI** |
 | Build-time version metadata (`-ldflags`) | ✅ | `internal/buildinfo` + `scripts/build.ps1`, falls back to `dev`/`none` without git |
 | Matching engine (`Matcher` interface, fixed-string + regex impls) | ✅ | `internal/matcher` — table + fuzz tested, **not yet reachable from the CLI** |
 | CLI flags for matching (`-i -v -F -w -x -e -f ...`) | 🚧 | `matcher.Options` supports `-i`/`-F`/`-w`/`-x` already; no Cobra flags expose them yet |
 | Actual search execution (`gg PATTERN FILE` producing output) | ⬜ | `grep.Run` is a stub that always returns `(ExitError, "not yet implemented")` |
 | Line-splitting reader (CRLF/LF/CR, no-trailing-newline) | ✅ | `internal/lineio` — table + fuzz tested, **not yet reachable from the CLI** |
 | Encoding/BOM detection, UTF-16 transcode, binary sniff | ✅ | `internal/encoding` — table + fuzz tested, **detection only, no skip/`--text` policy yet, not wired into the CLI** |
-| Recursive directory walk, `--include`/`--exclude` | ⬜ | `internal/walker` |
+| Recursive directory walk, glob expansion, `--include`/`--exclude`/`--exclude-dir` | ✅ | `internal/walker` — table + fuzz tested, **not yet reachable from the CLI** |
+| Terminal detection, Windows ANSI enabling | ✅ | `internal/termenv` — tested for non-terminal cases; real-console behavior needs manual verification (see LIMITATIONS) |
 | Output formatting (filename prefix, line numbers, context, color) | ⬜ | `internal/output` |
 
 Running `gg` today will parse arguments and print usage/version correctly,
@@ -103,9 +106,10 @@ internal/matcher/      pattern matching: fixed-string + regex, no I/O     [done]
 internal/buildinfo/    Version/Commit/Date via -ldflags                   [done]
 internal/lineio/       CRLF/LF/CR line splitting, streaming, no length cap [done]
 internal/encoding/     BOM detect/strip, UTF-16->UTF-8 transcode, binary sniff [done: detection]
-internal/walker/       file/dir traversal, include/exclude globs         [not started]
+internal/walker/       file/dir traversal, glob expansion, include/exclude [done]
 internal/output/       printer: plain/color, context, filename prefixing [not started]
-internal/termenv/      Windows console-mode / isatty handling            [not started]
+internal/termenv/      Windows console-mode / isatty handling            [done]
+internal/source/       open a file or stdin, Windows-safe sharing flags  [done]
 ```
 
 `internal/grep` is the seam: `internal/cli` depends on it, it will depend
@@ -189,6 +193,114 @@ rationale.
   path, asserts only "never panics, decode errors are the worst case"
   since arbitrary fuzz bytes aren't guaranteed valid UTF-16.
 
+### `internal/termenv` design (implemented)
+
+- `IsTerminal(*os.File) bool` wraps `golang.org/x/term.IsTerminal` rather
+  than hand-rolling `isatty` — Windows terminal detection isn't a single
+  ioctl the way Unix's is (conhost vs. ConPTY vs. redirected handle), so
+  this defers to a maintained, cross-platform implementation.
+- `EnableANSI(*os.File) bool` attempts to turn on
+  `ENABLE_VIRTUAL_TERMINAL_PROCESSING` via `golang.org/x/sys/windows`'
+  `GetConsoleMode`/`SetConsoleMode` directly — chosen over a wrapper
+  library (`go-colorable`, `termenv`) since it's a handful of lines
+  against a stable Win32 API, and those libraries' main value (ANSI
+  translation for pre-Windows-10 consoles with no VT support at all)
+  isn't a target for this project. Split by build tag: `ansi_windows.go`
+  does the real work; `ansi_other.go` is an unconditional-`true` no-op,
+  since non-Windows terminals already handle ANSI natively.
+- **Detection only, no policy**, same pattern as `matcher`/`lineio`/
+  `encoding`: neither function decides whether color should actually be
+  used — combining these with a `--color=auto|always|never` flag value
+  belongs to the future output layer (§4 step 7).
+- **Known test gap, stated rather than hidden**: unit tests prove
+  `IsTerminal`/`EnableANSI` correctly report "not a terminal" for regular
+  files and pipes — the only two cases constructible inside an
+  automated `go test` run. Behavior against a genuine interactive
+  console (legacy conhost vs. Windows Terminal/ConPTY) has **not** been
+  verified and needs manual testing; tracked in LIMITATIONS below.
+
+### `internal/walker` design (implemented)
+
+- `ExpandGlobs([]string) ([]string, error)` exists because PowerShell
+  and cmd.exe — unlike POSIX shells — never expand globs before
+  invoking a process: `gg pattern *.go` reaches `gg` with the literal
+  three characters `*.go` as an argument. Precedence: a literal existing
+  path always wins over glob interpretation (a real file named
+  `a[1].txt` isn't glob-mangled); a pattern with zero matches passes
+  through unchanged so a "no such file" error surfaces naturally later,
+  mirroring a POSIX shell's own non-nullglob behavior.
+- `Walk(root string, opts Options, visit VisitFunc) error` — single-root,
+  callback-based, deterministic (lexical) order, same "report facts,
+  not policy" contract as every other package here: it never decides to
+  print a filename prefix or a binary-file warning, just calls `visit`.
+- **Matches grep's actual "Is a directory" behavior**, not an invented
+  shallow-scan mode: a directory root without `Recursive: true` reports
+  `ErrIsDir` instead of silently listing one level — real grep doesn't
+  have a shallow mode either, so this doesn't invent one.
+- **Symlink policy**: default `FollowSymlinks: false` skips any symlink
+  *encountered while recursing* entirely (neither read nor descended);
+  an explicit root argument is always dereferenced regardless (matching
+  `cat somelink`-style "explicit args are always followed" convention).
+  `FollowSymlinks: true` is implemented now, with cycle detection via
+  `filepath.EvalSymlinks`-canonicalized visited-directory tracking,
+  tested against a real symlink cycle under a 5-second hang guard — not
+  deferred to the future `--follow` *flag*, only that flag's CLI wiring is.
+- **Case-aware include/exclude matching**: case-insensitive on Windows,
+  case-sensitive elsewhere (`runtime.GOOS`-gated), mirroring each OS's
+  own native tools. The case-folding logic is factored out from the OS
+  check specifically so both branches are unit-tested directly on one
+  CI runner, rather than needing platform-specific build tags to test
+  what's otherwise identical logic.
+- **Bad glob patterns fail fast**: `--include`/`--exclude`/
+  `--exclude-dir` patterns are validated against `filepath.Match` up
+  front, before any traversal starts — `filepath.Match`'s `ErrBadPattern`
+  is easy to swallow accidentally deep in recursive matching code, so
+  it's checked once, eagerly, instead.
+- **Long paths verified, not engineered around**: Go 1.26 on this
+  Windows toolchain walks a >300-character path with zero special
+  handling (no `\\?\` prefix, no manifest change) — proven with a
+  regression test rather than assumed.
+- **Caveat, not fully verified**: Windows directory junctions are
+  reparse points, not symlinks; whether Go's `os` package reports them
+  with `fs.ModeSymlink` (so the same skip/follow logic applies) is
+  believed true on modern Go but wasn't specifically tested — creating a
+  junction needs `mklink /J` or raw syscalls, not `os.Symlink`.
+- Fuzzed (`FuzzMatchOneCaseAware`, `FuzzExpandGlobs`): ~900K executions
+  combined against arbitrary glob patterns and names, zero panics.
+
+### `internal/source` design (implemented) — a real Windows bug found and fixed
+
+- `Open(path string) (ReadCloser, error)` opens a named file, or standard
+  input when `path == "-"` (the Close on the stdin wrapper is always a
+  safe no-op — it never closes the process's real `os.Stdin`).
+- **This is the one package so far where the correctness checklist
+  surfaced an actual bug, not just a decision to document.** Verified
+  against Go 1.26's own `src/syscall/syscall_windows.go` *and*
+  empirically with a throwaway scratch program: plain `os.Open` on
+  Windows opens with `FILE_SHARE_READ|FILE_SHARE_WRITE` but **not**
+  `FILE_SHARE_DELETE`. Concretely: a concurrent *write* to a file gg has
+  open for reading succeeds, but a concurrent *rename or delete* —
+  exactly what typical log rotation does — fails with "The process
+  cannot access the file because it is being used by another process."
+  POSIX has no such restriction.
+- **Fixed**, not just documented: on Windows, `internal/source` opens
+  files via `golang.org/x/sys/windows.CreateFile` directly, adding
+  `FILE_SHARE_DELETE`. Regression-tested directly — `TestOpen_
+  AllowsDeleteWhileOpen` and `TestOpen_AllowsRenameWhileOpen` both fail
+  against plain `os.Open` and pass against this fix; `TestOpen_
+  StillReadableAfterConcurrentDelete` proves the fix is actually useful
+  (the still-open handle keeps reading the original content after
+  the file is unlinked, matching POSIX unlink-while-open semantics).
+- **Reserved device names** (`NUL`, `CON`, `PRN`, `COM1`, ...): decided
+  against any special-casing, verified for `NUL` specifically —
+  `os.Stat("NUL")` reports a non-directory character device and
+  `os.Open("NUL")` + read yields immediate EOF with no error, the same
+  harmless outcome Unix grep gets from `/dev/null`. `CON` was
+  deliberately **not** live-tested (opening it could block on keyboard
+  input with no console attached to an automated test) — the same
+  reasoning is expected to hold but is flagged as unverified, not
+  claimed.
+
 ## BUILDING
 
 ```powershell
@@ -223,6 +335,26 @@ go test ./...
   hand-assembled wrong), the binary/UTF-16 interaction edge case above,
   an integration test proving composition with `lineio`, and a fuzz
   target (~2.2M executions, zero crashes).
+- `internal/termenv` has unit tests for the two non-terminal cases
+  constructible in an automated test (regular file, pipe); real-console
+  behavior is a manual-testing gap, stated explicitly rather than
+  claimed covered.
+- `internal/walker` has unit tests for recursion, `ErrIsDir`,
+  include/exclude/exclude-dir filtering, native path-separator
+  preservation, symlink default-skip and follow-with-cycle-detection
+  (under a 5s hang guard), a >300-character long-path regression, and
+  fuzz targets for glob-pattern matching and expansion (~900K executions
+  combined, zero panics).
+- `internal/source` has regression tests for the Windows file-sharing
+  fix specifically (concurrent write/delete/rename while open, plus
+  proving the still-open handle keeps reading after a concurrent
+  delete), the `"-"` → stdin mapping, and (Windows-only) the `NUL`
+  reserved-device-name case.
+- `internal/cli` and `internal/grep` have tests for the exit-code
+  contract (`--version`/`--help`/no-args, and — via a swappable
+  `runGrep` seam — all three of `ExitMatch`/`ExitNoMatch`/`ExitError`
+  from a fake engine), argument-to-`Options` wiring, and context
+  propagation/cancellation for the Ctrl+C plumbing.
 - `go test -race` currently fails **locally** on this machine with
   `0xc0000139` — that's an incompatible `gcc` (Strawberry Perl's, found
   first on `PATH`) rather than a code issue; GitHub Actions'
@@ -232,7 +364,16 @@ go test ./...
 ## LIMITATIONS (current, expected to shrink)
 
 - Does not yet search anything — `gg PATTERN FILE` exits `2`.
-- No recursive directory search, no globbing, no color output.
+- `internal/walker`, `internal/termenv`, and `internal/source` exist and
+  are tested, but nothing calls them yet — no `-r`/`-R`/`--include`/
+  `--exclude`/`--color` flags exist on the CLI, glob expansion isn't
+  applied to CLI arguments yet, and `grep.Run` doesn't open any files.
+- Graceful shutdown on Ctrl+C is wired at the plumbing level
+  (`context.Context` flows from `main.go` all the way to `grep.Run`,
+  which checks `ctx.Err()`), but there's no actual long-running work or
+  buffered output yet for cancellation to meaningfully interrupt —
+  the real test of this is deferred until the output layer exists.
+- No color output (no output layer yet at all — see above).
 - No PCRE (backreferences/lookaround); RE2 syntax only.
 - Encoding/BOM/binary *detection* exists (`internal/encoding.Sniff`) but
   isn't wired to anything yet — no code calls it before opening a file.
@@ -247,6 +388,15 @@ go test ./...
   file's terminator or platform (PROCESS.md §3.1) — but there is no
   output layer yet to actually do that. `internal/lineio.Terminator`
   records the source fact only and explicitly does not drive this.
+- `internal/termenv`'s behavior against a genuine interactive console
+  (legacy conhost vs. Windows Terminal/ConPTY) has not been verified —
+  only "is this a regular file/pipe" (correctly `false`) is covered by
+  automated tests. Needs manual verification in both console types.
+- `internal/walker`'s symlink-following logic has not been specifically
+  tested against a Windows directory junction (a different underlying
+  mechanism from `os.Symlink`-created symlinks) — believed to behave
+  the same way based on how modern Go's `os` package reports reparse
+  points, but not proven with a test here.
 
 ## SEE ALSO
 

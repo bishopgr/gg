@@ -145,55 +145,130 @@ chasing feature parity or performance.
 - Legacy `cmd.exe` and old Windows PowerShell consoles historically did
   not interpret ANSI color codes; Windows 10+ consoles support virtual
   terminal sequences but the mode must be enabled via
-  `SetConsoleMode` + `ENABLE_VIRTUAL_TERMINAL_PROCESSING`. Use
-  `golang.org/x/sys/windows` directly or a maintained wrapper
-  (`github.com/mattn/go-colorable`, `github.com/muesli/termenv`) — decide
-  which, add to `internal/termenv`, and gate all color output through it.
+  `SetConsoleMode` + `ENABLE_VIRTUAL_TERMINAL_PROCESSING`.
+  **Decided:** `golang.org/x/sys/windows` directly (`GetConsoleMode`/
+  `SetConsoleMode`), not a wrapper library — it's a handful of lines
+  against a stable, documented Win32 API, and go-colorable/termenv's
+  main value (ANSI-to-Win32-API translation for pre-Windows-10 consoles
+  that can't interpret VT sequences at all) isn't a target for this
+  project. Implemented as `internal/termenv.EnableANSI`, split by build
+  tag (`ansi_windows.go` / `ansi_other.go`; non-Windows is a no-op
+  reporting success, since those terminals already handle ANSI
+  natively).
 - Detect "is stdout a terminal" correctly on Windows (a real console vs.
-  redirected to a file/pipe) before defaulting `--color=auto` to on;
-  `golang.org/x/term.IsTerminal` handles this cross-platform — use it
-  instead of hand-rolling `isatty`.
+  redirected to a file/pipe) before defaulting `--color=auto` to on.
+  **Decided:** `golang.org/x/term.IsTerminal`, wrapped as
+  `internal/termenv.IsTerminal(*os.File) bool`, instead of hand-rolling
+  `isatty`. Detection only — `internal/termenv` does not decide
+  `--color` policy; that's for the future output layer (§4 step 7) to
+  combine with the flag value.
 - Windows Terminal / ConPTY vs. legacy conhost: test in both if possible;
   behavior differs for redirected output and ANSI passthrough.
+  **Not fully verified**: unit tests cover regular files and pipes
+  (both correctly report non-terminal), but a genuine interactive
+  console can't be constructed inside an automated `go test` run in
+  this environment — manual verification on both conhost and Windows
+  Terminal is still an open item, tracked in README's LIMITATIONS.
 
 ### 3.4 Paths and globbing
 - **PowerShell and cmd.exe do not expand globs before invoking the
   process** (unlike POSIX shells). If `gg` is to support `gg pattern *.go`,
   `gg` itself must expand the glob for arguments that look like patterns
   and didn't match a literal file — implement this in `internal/walker`,
-  not by relying on shell behavior. Use `filepath.Glob` or a richer
-  matcher (`github.com/bmatcuk/doublestar` for `**`) and unit-test it
-  standalone from the Cobra layer.
+  not by relying on shell behavior.
+  **Decided:** `filepath.Glob` (no `**` support via doublestar for v1 —
+  not a stated goal yet). Implemented as `walker.ExpandGlobs`: a literal
+  existing path always wins over glob interpretation (so a real file
+  named `a[1].txt` isn't glob-mangled), and a pattern with zero matches
+  passes through unchanged so a later "no such file" error surfaces
+  naturally — mirroring a POSIX shell's own non-nullglob behavior.
+  Unit-tested standalone from the Cobra layer, per plan.
 - Normalize path separators for display: accept both `/` and `\` on
   input, but be deliberate about what gets printed (grep prints paths as
   given/discovered — on Windows that means backslashes from
   `filepath.Walk`/`fs.WalkDir`, which is correct and expected; don't
   force-convert to `/`).
+  **Decided:** do nothing — `walker.Walk` builds every path via
+  `filepath.Join`, which already uses the OS-native separator and
+  preserves the root's own relative/absolute form. Verified with a test
+  asserting the native separator is actually present in a result.
 - Case-insensitive filesystem: Windows paths are case-insensitive but
   case-preserving. This affects `--include`/`--exclude` glob matching
   (decide: match case-insensitively on Windows, case-sensitively on
   Unix — mirror how the native tools on each OS behave) and de-duplication
   of file arguments.
+  **Decided:** case-insensitive on Windows (`runtime.GOOS == "windows"`),
+  case-sensitive elsewhere, implemented in `walker.matchOneCaseAware`
+  with the case-folding logic separated from the OS check so both
+  branches are directly unit-tested on one CI runner rather than relying
+  on platform-specific build tags for what's otherwise identical logic.
+  File-argument de-duplication is not yet implemented — deferred until
+  something actually needs it (no observed bug motivating it yet).
 - Long paths / `\\?\` prefix: if recursive search may hit paths >260
   chars, decide whether to opt into Go's long-path handling (Go 1.24+ on
   Windows generally handles this via `GetFullPathNameW`/manifest — verify
   on the installed toolchain rather than assuming) and add a regression
   test with a deeply nested testdata directory if this matters for target
   users.
+  **Verified, not a decision**: Go 1.26 on this Windows toolchain handles
+  paths >260 characters transparently with zero special handling — no
+  `\\?\` prefix, no manifest change, nothing. `TestWalk_LongPath` builds
+  a >300-character nested path and confirms it's walked correctly. If a
+  future Go upgrade or a different toolchain ever regresses this, that
+  test will catch it.
 - Symlinks/junctions/reparse points: Windows has directory junctions and
   symlinks with different creation privileges. Decide the recursion
   policy (default: don't follow symlinks, add `--follow` later) up front
   so `internal/walker` has one clear contract.
+  **Decided:** default `FollowSymlinks: false` — any symlink
+  *encountered while recursing* (to a file or a directory) is skipped
+  entirely, neither read nor descended into. A root passed directly to
+  `Walk` is always dereferenced regardless of this setting (matching the
+  "explicit arguments are always followed" convention, e.g. `cat
+  somelink`). `FollowSymlinks: true` is implemented now (not deferred to
+  a later `--follow` flag's implementation — only the CLI flag itself is
+  deferred) with cycle detection via `filepath.EvalSymlinks`-canonicalized
+  visited-directory tracking, tested with an actual symlink cycle under
+  a 5-second hang guard.
+  **Caveat, not fully verified**: Windows directory junctions are
+  reparse points, not symlinks, and whether Go's `os` package reports
+  them with `fs.ModeSymlink` (so this same logic applies to them too) is
+  believed true on modern Go but was not specifically tested here — no
+  junction was created in a test (that needs `mklink /J` or raw
+  syscalls, not `os.Symlink`). Flagged rather than assumed correct.
 
 ### 3.5 Process/exit semantics
 - Exit codes must be `0`/`1`/`2` regardless of OS — verify Cobra isn't
   swallowing this (don't let a Cobra-level error print + exit 1 mask a
   "no matches" vs "real error" distinction).
+  **Verified, and now regression-tested**: this contract was only
+  smoke-tested manually back at scaffolding time (step 1) — which is
+  exactly how the `--version`/`--help` incorrectly-exiting-2 bug was
+  found and fixed then. It had zero automated coverage since. Closed
+  now: `internal/cli` gained a `runGrep` seam (a swappable package var,
+  restored after each test) so `TestExecute_PropagatesExitCodeFromRunGrep`
+  can drive all three codes without a real search engine existing yet,
+  plus the original `--version`/`--help`/no-args cases are now
+  permanent tests instead of one-off manual checks.
 - `Ctrl+C` (SIGINT) handling on Windows goes through
   `os/signal` + `syscall.SIGINT`, which Go maps from `CTRL_C_EVENT` —
   verify graceful shutdown (flush buffered output) works under
   `go build` binaries run directly and via `go run` (behaves differently
   on Windows due to the intermediary process).
+  **Decided and wired, ahead of there being real work to cancel**:
+  `main.go` derives a `context.Context` from
+  `signal.NotifyContext(context.Background(), os.Interrupt)` — the same
+  API and the same `os.Interrupt` value handles both Unix SIGINT and
+  Windows' `CTRL_C_EVENT` translation, no OS branch needed. This is
+  threaded through `cli.Execute(ctx, args)` → Cobra's
+  `ExecuteContext`/`cmd.Context()` → `grep.Run(ctx, opts)`, and `Run`
+  already checks `ctx.Err()` eagerly (tested) even though it has nothing
+  to flush yet — the point is that the walker/file-reading loop landing
+  in step 4+ doesn't need a breaking signature change to gain
+  cancellation. **Not yet verified**: actually flushing buffered output
+  gracefully mid-search under `go build` vs. `go run` on Windows, since
+  there's no buffered output (or search) to flush yet — deferred until
+  the output layer exists.
 
 ### 3.6 File reading specifics
 - Opening files: no `O_NONBLOCK`-style POSIX assumptions; Windows file
@@ -201,10 +276,39 @@ chasing feature parity or performance.
   without `FILE_SHARE_DELETE` etc. can behave differently under
   concurrent writes) — if grepping log files that are actively written,
   test that behavior explicitly rather than assuming POSIX semantics.
+  **Found a real gap, and fixed it**: empirically verified (not
+  assumed) against this exact Go version — plain `os.Open` on Windows
+  sets `FILE_SHARE_READ|FILE_SHARE_WRITE` but *not*
+  `FILE_SHARE_DELETE` (confirmed in `src/syscall/syscall_windows.go`).
+  Concretely: with plain `os.Open`, a concurrent write while gg holds a
+  file open succeeds, but a concurrent rename or delete — exactly what
+  typical log rotation does — fails with "The process cannot access the
+  file because it is being used by another process." POSIX has no such
+  restriction. Fixed in `internal/source.Open`: on Windows, files are
+  opened via `golang.org/x/sys/windows.CreateFile` directly with
+  `FILE_SHARE_DELETE` added, matching POSIX's more permissive
+  unlink/rename-while-open semantics. Regression-tested directly
+  (`TestOpen_AllowsDeleteWhileOpen`, `TestOpen_AllowsRenameWhileOpen`),
+  including that the still-open handle keeps reading the original
+  content after the concurrent delete
+  (`TestOpen_StillReadableAfterConcurrentDelete`).
 - `CON`, `NUL`, `PRN`, `COM1`... are reserved device names on Windows —
   decide how `internal/walker` handles a literal file argument that
   collides with a reserved name (should basically never come up from
   real directory walks, but a user could pass `gg pattern NUL`).
+  **Decided, verified empirically, no special-casing needed**:
+  `os.Stat("NUL")` succeeds (reports a non-directory character device,
+  size 0) and `os.Open("NUL")` + read yields immediate EOF with no
+  error — the same harmless outcome Unix grep gets from `/dev/null`.
+  Neither `internal/walker` nor `internal/source` special-cases reserved
+  names at all; the OS already does the right thing. Verified with
+  `TestOpen_NULDevice` (Windows-only). `CON`/`PRN`/`COMn` were
+  deliberately **not** live-tested — `CON` in particular would open the
+  real console and could block waiting for keyboard input inside an
+  automated test with no console attached, which is not a risk worth
+  taking just to confirm a rarely-hit path; the same "let the OS handle
+  it, don't special-case" reasoning is expected to apply but is flagged
+  as reasoned-not-tested rather than claimed verified.
 
 ---
 
@@ -300,6 +404,10 @@ Fill in as choices are made; each row should reference the section above.
 | UTF-16 handling | **Decided:** detect via BOM (LE/BE) and transcode to UTF-8 via `golang.org/x/text/encoding/unicode`, streaming (no whole-file read). No-BOM UTF-16 is undetectable by design (no reliable signature) and falls through to the plain NUL-byte binary heuristic — this is a known, accepted gap, not an oversight. `internal/encoding.Sniff`. | §3.2 |
 | Binary-detection heuristic | **Decided:** NUL byte anywhere in an 8000-byte prefix (mirrors Git's `buffer_is_binary`), skipped entirely (forced `Binary: false`) when a UTF-16 BOM was positively identified, since UTF-16 ASCII text is legitimately full of zero bytes. Detection only — the skip/`--text` *policy* is deferred to the engine wiring step. `internal/encoding.Sniff` | §3.2 |
 | Trailing newline emission | **Decided:** always `\n` on output, regardless of source terminator or platform — never `\r\n`, never omitted, no `diff`-style "no newline" warning. Not yet implemented (belongs to `internal/output`, §4 step 6); recorded ahead of that package existing. | §3.1 |
-| Symlink recursion default | follow / don't follow | §3.4 |
-| Color library | `x/term` + hand-rolled vs. `go-colorable`/`termenv` | §3.3 |
-| Long path support | rely on Go runtime vs. explicit `\\?\` handling | §3.4 |
+| Symlink recursion default | **Decided:** don't follow (default `FollowSymlinks: false`); explicit roots always dereferenced regardless. `internal/walker.Walk` | §3.4 |
+| Color library | **Decided:** `golang.org/x/term.IsTerminal` for detection + `golang.org/x/sys/windows` `SetConsoleMode` directly for enabling ANSI on Windows — no wrapper library. `internal/termenv` | §3.3 |
+| Long path support | **Verified:** Go 1.26 on this Windows toolchain handles paths >260 chars transparently, no `\\?\` prefix or manifest needed. `TestWalk_LongPath` | §3.4 |
+| Exit-code contract test coverage | **Decided:** add a swappable `runGrep` package var in `internal/cli` purely for testability, so the 0/1/2 contract has permanent regression tests instead of the one-off manual verification that originally caught the `--version`/`--help` exit-2 bug. `internal/cli.runGrep` | §3.5 |
+| Ctrl+C / graceful shutdown | **Decided:** `signal.NotifyContext(context.Background(), os.Interrupt)` in `main.go`, threaded via Cobra's `ExecuteContext`/`cmd.Context()` into `grep.Run(ctx, opts)`. Wired ahead of there being real work to cancel, specifically to avoid a breaking signature change later. `cmd/gg/main.go`, `internal/grep.Run` | §3.5 |
+| Windows file-sharing semantics | **Decided (and a real bug found+fixed):** plain `os.Open` on Windows omits `FILE_SHARE_DELETE` (confirmed against Go 1.26's own source and empirically), breaking concurrent rename/delete — e.g. log rotation — while gg holds a file open. `internal/source.Open` opens via `x/sys/windows.CreateFile` with `FILE_SHARE_DELETE` added on Windows. `internal/source` | §3.6 |
+| Reserved device names (`NUL`, `CON`, ...) | **Decided:** no special-casing — verified `os.Stat`/`os.Open` on `NUL` already behave harmlessly (empty read, no error), matching Unix `/dev/null` semantics. `CON`/`PRN`/`COMn` reasoned-but-not-live-tested (opening `CON` risks blocking on keyboard input with no console attached). | §3.6 |

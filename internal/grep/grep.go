@@ -4,7 +4,10 @@
 // package; this package must never import internal/cli or Cobra.
 package grep
 
-import "errors"
+import (
+	"context"
+	"errors"
+)
 
 // Exit codes mirror POSIX grep semantics: callers (internal/cli, then
 // main.go) propagate these as the process exit code.
@@ -29,7 +32,20 @@ type Options struct {
 // user. Run is the single entry point the CLI layer calls into — no
 // terminal/color/os.Exit policy belongs below this boundary, and no flag
 // parsing belongs above it.
-func Run(opts Options) (int, error) {
+//
+// ctx carries graceful-shutdown signaling (PROCESS.md §3.5: Ctrl+C on
+// Windows arrives as os.Interrupt via Go's CTRL_C_EVENT translation,
+// wired up in main.go via signal.NotifyContext). It is accepted now,
+// ahead of there being any actual long-running work to cancel, so that
+// the walker/file-reading loop this fills in next (PROCESS.md §4 step
+// 4+) doesn't need a breaking signature change later to gain it. Run
+// checks it eagerly so that contract is real, not decorative, from the
+// moment it exists.
+func Run(ctx context.Context, opts Options) (int, error) {
+	if err := ctx.Err(); err != nil {
+		return ExitError, err
+	}
+
 	// TODO(step 2+): wire internal/matcher, internal/lineio,
 	// internal/walker, internal/output per PROCESS.md §4.
 	return ExitError, errors.New("gg: search engine not yet implemented")
