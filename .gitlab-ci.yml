@@ -49,16 +49,16 @@ test:
   # coverage percentage (visible in the MR widget and, if configured,
   # a project badge). Matches `go tool cover -func`'s final summary
   # line, e.g. "total:            (statements)          82.4%".
-  # coverage: '/total:\s+\(statements\)\s+\d+\.\d+%/'
-  # artifacts:
-  #   when: always
-  #   expire_in: 1 week
-  #   paths:
-  #     - coverage.out
-  #   reports:
-  #     coverage_report:
-  #       coverage_format: cobertura
-  #       path: coverage.xml
+  coverage: '/total:\s+\(statements\)\s+\d+\.\d+%/'
+  artifacts:
+    when: always
+    expire_in: 1 week
+    paths:
+      - coverage.xml
+    reports:
+      coverage_report:
+        coverage_format: cobertura
+        path: coverage.xml
 
 # Runs `goreleaser release` against a tag push. Deliberately gated to
 # tags only: GoReleaser's whole model is "build/package/publish exactly
