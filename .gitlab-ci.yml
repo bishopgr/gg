@@ -43,22 +43,22 @@ test:
     - go tool cover -func=coverage.out
     # Cobertura XML so GitLab can annotate merge request diffs with
     # per-line coverage, not just show the summary percentage below.
-    - go install github.com/boumenot/gocover-cobertura@latest
-    - gocover-cobertura < coverage.out > coverage.xml
+    #- go install github.com/boumenot/gocover-cobertura@latest
+    #- gocover-cobertura < coverage.out > coverage.xml
   # Regex GitLab scrapes from the job log to populate the pipeline's
   # coverage percentage (visible in the MR widget and, if configured,
   # a project badge). Matches `go tool cover -func`'s final summary
   # line, e.g. "total:            (statements)          82.4%".
-  coverage: '/total:\s+\(statements\)\s+\d+\.\d+%/'
-  artifacts:
-    when: always
-    expire_in: 1 week
-    paths:
-      - coverage.out
-    reports:
-      coverage_report:
-        coverage_format: cobertura
-        path: coverage.xml
+  # coverage: '/total:\s+\(statements\)\s+\d+\.\d+%/'
+  # artifacts:
+  #   when: always
+  #   expire_in: 1 week
+  #   paths:
+  #     - coverage.out
+  #   reports:
+  #     coverage_report:
+  #       coverage_format: cobertura
+  #       path: coverage.xml
 
 # Runs `goreleaser release` against a tag push. Deliberately gated to
 # tags only: GoReleaser's whole model is "build/package/publish exactly
