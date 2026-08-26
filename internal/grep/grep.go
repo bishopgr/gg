@@ -55,15 +55,16 @@ type Options struct {
 	LineRegexp  bool // -x
 
 	// Output shaping.
-	LineNumber        bool      // -n
-	OnlyMatching      bool      // -o
-	Count             bool      // -c
-	FilesWithMatches  bool      // -l
-	FilesWithoutMatch bool      // -L
-	Quiet             bool      // -q
-	NoFilename        bool      // -h
-	WithFilename      bool      // -H
-	Color             ColorMode // --color
+	LineNumber        bool       // -n
+	OnlyMatching      bool       // -o
+	Count             bool       // -c
+	FilesWithMatches  bool       // -l
+	FilesWithoutMatch bool       // -L
+	Quiet             bool       // -q
+	NoFilename        bool       // -h
+	WithFilename      bool       // -H
+	Color             ColorMode  // --color
+	Binary            BinaryMode // -a/--text or -I
 
 	// Context lines (-A/-B/-C). ContextEnabled is deliberately separate
 	// from "ContextBefore > 0 || ContextAfter > 0": GNU grep's own

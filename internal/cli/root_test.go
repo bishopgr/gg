@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"gg/internal/grep"
@@ -490,6 +491,95 @@ func TestExecute_NoPatternAndNoERegexpStillRequiresOneArg(t *testing.T) {
 	code := Execute(context.Background(), []string{})
 	if code != grep.ExitError {
 		t.Errorf("Execute(no args) = %d, want ExitError", code)
+	}
+}
+
+// --- binary file handling (-a/--text, -I) -----------------------------
+
+func TestExecute_DefaultBinaryModeIsUnset(t *testing.T) {
+	var gotOpts grep.Options
+	withFakeRunGrep(t, func(ctx context.Context, opts grep.Options) (int, error) {
+		gotOpts = opts
+		return grep.ExitMatch, nil
+	})
+
+	Execute(context.Background(), []string{"pattern", "file.txt"})
+
+	if gotOpts.Binary != grep.BinaryDefault {
+		t.Errorf("Binary = %v, want BinaryDefault", gotOpts.Binary)
+	}
+}
+
+func TestExecute_TextFlagSetsBinaryText(t *testing.T) {
+	tests := [][]string{
+		{"-a", "pattern", "file.txt"},
+		{"--text", "pattern", "file.txt"},
+	}
+	for _, args := range tests {
+		t.Run(args[0], func(t *testing.T) {
+			var gotOpts grep.Options
+			withFakeRunGrep(t, func(ctx context.Context, opts grep.Options) (int, error) {
+				gotOpts = opts
+				return grep.ExitMatch, nil
+			})
+
+			Execute(context.Background(), args)
+
+			if gotOpts.Binary != grep.BinaryText {
+				t.Errorf("Binary = %v, want BinaryText", gotOpts.Binary)
+			}
+		})
+	}
+}
+
+func TestExecute_ISetsBinarySkip(t *testing.T) {
+	tests := [][]string{
+		{"-I", "pattern", "file.txt"},
+		{"--skip-binary", "pattern", "file.txt"},
+	}
+	for _, args := range tests {
+		t.Run(args[0], func(t *testing.T) {
+			var gotOpts grep.Options
+			withFakeRunGrep(t, func(ctx context.Context, opts grep.Options) (int, error) {
+				gotOpts = opts
+				return grep.ExitMatch, nil
+			})
+
+			Execute(context.Background(), args)
+
+			if gotOpts.Binary != grep.BinarySkip {
+				t.Errorf("Binary = %v, want BinarySkip", gotOpts.Binary)
+			}
+		})
+	}
+}
+
+// TestExecute_ITakesPrecedenceOverTextWhenBothGiven documents gg's own
+// deliberate, simplified precedence rule for the rare case both flags
+// are given together: -I always wins, regardless of which flag appears
+// last on the command line. This is a documented divergence from real
+// GNU grep, which tracks true command-line order here — reproducing
+// that exactly would require inspecting raw argument order ourselves
+// for a combination unlikely to ever be given deliberately.
+func TestExecute_ITakesPrecedenceOverTextWhenBothGiven(t *testing.T) {
+	tests := [][]string{
+		{"-a", "-I", "pattern", "file.txt"},
+		{"-I", "-a", "pattern", "file.txt"},
+	}
+	for _, args := range tests {
+		t.Run(strings.Join(args[:2], " "), func(t *testing.T) {
+			var gotOpts grep.Options
+			withFakeRunGrep(t, func(ctx context.Context, opts grep.Options) (int, error) {
+				gotOpts = opts
+				return grep.ExitMatch, nil
+			})
+
+			Execute(context.Background(), args)
+
+			if gotOpts.Binary != grep.BinarySkip {
+				t.Errorf("Binary = %v, want BinarySkip (-I must win)", gotOpts.Binary)
+			}
+		})
 	}
 }
 

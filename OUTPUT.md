@@ -380,6 +380,35 @@ printing rather than in a separate blanket check beforehand.
 All ~109 automated tests (`go test ./...`) plus the manual scenarios
 above pass after the fix.
 
+> **Correction (later session, while implementing `-a`/`-I`)**: the fix
+> above was still wrong, and the "regression coverage" it added asserted
+> the wrong exit codes — this was caught because implementing `-I -L`
+> required oracle-testing `-L` against real GNU grep far more
+> thoroughly than the single "every file matches" scenario checked here,
+> and real grep disagreed with gg on multiple cases. The actual rule,
+> verified directly against real GNU grep (Git for Windows' `grep.exe`)
+> across a systematic matrix of single/multi-file, matching/non-matching
+> combinations: **`-l`/`-L`'s exit code is always identical to plain
+> grep's own — 0 iff the pattern matched *some* line in *some* file —
+> completely independent of which filenames `-l`/`-L` itself chooses to
+> print.** Concretely, `grep -L pat onlyfile` where `onlyfile` does
+> *not* match still exits `1`, even though `-L` prints `onlyfile`'s
+> name; and `grep -L pat a b` where only `a` matches (so `-L` prints
+> only `b`) exits `0`, because *something* matched, even though the file
+> `-L` printed did not. The "every file matches → exit 1" case this
+> session verified manually was never actually cross-checked against
+> real grep — it only "looked" correct because gg's own new (still
+> wrong) output seemed more intuitive than its old output, and that
+> specific case happens to be the *one* scenario the old and new *wrong*
+> answers still disagreed about in the direction that looked plausible.
+> Properly fixed in `internal/grep/engine.go` (uniform `matched`-based
+> `hadMatch` for every mode, decoupled from each mode's own print
+> criterion) with a full oracle-verified test matrix in
+> `run_test.go`'s `TestRun_FilesWithoutMatch_ExitCodeReflectsRawMatching`
+> and real-process coverage in `test/e2e`. Lesson: "gg's new output looks
+> more plausible than its old output" is not the same as "verified
+> against a real grep implementation" — this file's own stated purpose.
+
 ### Non-bug: PowerShell pipeline byte-mangling during a `Format-Hex` inspection
 
 Piping `gg`'s output through `Select-Object -First 1 | Format-Hex`

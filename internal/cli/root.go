@@ -86,6 +86,9 @@ type flags struct {
 
 	patternExprs []string // -e
 	patternFiles []string // -f
+
+	textBinary bool // -a / --text
+	skipBinary bool // -I
 }
 
 func newRootCmd(exitCode *int) *cobra.Command {
@@ -165,6 +168,23 @@ func newRootCmd(exitCode *int) *cobra.Command {
 				cmd.Flags().Changed("before-context") ||
 				cmd.Flags().Changed("context")
 
+			// -a/-I precedence: unlike -A/-B/-C, this is a plain,
+			// documented "the more restrictive flag wins if both are
+			// given" rule rather than an attempt at exact command-line-
+			// order last-one-wins semantics (verified only informally
+			// against real GNU grep, which does track flag order here —
+			// but reproducing that precisely would need inspecting raw
+			// argument order ourselves, for a combination unlikely to
+			// ever be given deliberately). -I is checked last so it
+			// wins over -a when both are present.
+			binaryMode := grep.BinaryDefault
+			if f.textBinary {
+				binaryMode = grep.BinaryText
+			}
+			if f.skipBinary {
+				binaryMode = grep.BinarySkip
+			}
+
 			opts := grep.Options{
 				Patterns:     patterns,
 				PatternFiles: f.patternFiles,
@@ -185,6 +205,7 @@ func newRootCmd(exitCode *int) *cobra.Command {
 				NoFilename:        f.noFilename,
 				WithFilename:      f.withFilename,
 				Color:             colorMode,
+				Binary:            binaryMode,
 
 				Recursive:      f.recursive || f.dereferenceRecursive,
 				FollowSymlinks: f.dereferenceRecursive,
@@ -266,6 +287,16 @@ func registerFlags(cmd *cobra.Command, f *flags) {
 
 	flagSet.StringArrayVarP(&f.patternExprs, "regexp", "e", nil, "use PATTERN as a matching pattern (may be repeated); once given, every positional argument is a FILE instead")
 	flagSet.StringArrayVarP(&f.patternFiles, "file", "f", nil, "read patterns from FILE, one per line (may be repeated); \"-\" means stdin")
+
+	flagSet.BoolVarP(&f.textBinary, "text", "a", false, "treat binary files as text")
+	// GNU grep's own -I has no separate long-flag form at all (it's
+	// shorthand for --binary-files=without-match, which gg doesn't
+	// implement — see README LIMITATIONS). Registering it with an empty
+	// long name to match that exactly renders as a bare "-I, --" in
+	// --help output, which looks broken rather than intentional — so
+	// gg gives it "--skip-binary" as its own long form instead, a gg-
+	// specific convenience rather than a claim of GNU compatibility.
+	flagSet.BoolVarP(&f.skipBinary, "skip-binary", "I", false, "skip binary files entirely, as if they had no matches")
 
 	cmd.MarkFlagsMutuallyExclusive("files-with-matches", "files-without-match")
 	cmd.MarkFlagsMutuallyExclusive("no-filename", "with-filename")

@@ -138,90 +138,125 @@ func (e *engine) searchReader(displayName string, r io.Reader) {
 	sniff, sr := encoding.Sniff(r)
 	lr := lineio.NewReader(sr)
 
+	// -I: a binary-detected file is treated as if it produced no
+	// matches at all, without reading any further — verified directly
+	// against real GNU grep: -c reports 0 for it, -l never lists it,
+	// -L always does, and -v makes no observable difference (the file
+	// is simply never searched). Skipping the loop entirely below,
+	// rather than special-casing each mode's output here, is what makes
+	// all of those fall out of the ordinary end-of-function bookkeeping
+	// for free, from matched/count staying at their zero values.
+	skipBinary := sniff.Binary && e.opts.Binary == BinarySkip
+	// -a/--text: treat a binary-detected file exactly like text for
+	// matching, context lines, and output — verified directly against
+	// real GNU grep, including that -C/-v work normally against it (raw
+	// NUL bytes and all).
+	asText := !sniff.Binary || e.opts.Binary == BinaryText
+
 	matched := false
 	count := 0
 	binaryReported := false
 	lineNo := 0
 
-	for {
-		if e.ctx.Err() != nil {
-			e.hadError = true
-			return
-		}
-
-		line, err := lr.ReadLine()
-		if err != nil {
-			if err == io.EOF {
-				break
+	if !skipBinary {
+		for {
+			if e.ctx.Err() != nil {
+				e.hadError = true
+				return
 			}
-			e.reportError(displayName, err)
-			return
-		}
-		lineNo++
 
-		// rawRanges is what the pattern literally matched on this line,
-		// independent of -v. It's kept separate from the (possibly
-		// nil'd-out) ranges used for the *selected* line's own
-		// highlighting because a line excluded by -v can still surface
-		// later as a context line (see the -v+-C interaction test) and
-		// must highlight its own literal matches when it does — verified
-		// directly against real grep, which does exactly this.
-		rawRanges := e.matcher.Find(line.Text)
-		isMatch := len(rawRanges) > 0
-		ranges := rawRanges
-		if e.opts.InvertMatch {
-			isMatch = !isMatch
-			ranges = nil // nothing to highlight: the line was selected for NOT matching
-		}
-
-		if !isMatch {
-			if e.context != nil && e.mode == modeNormal && !sniff.Binary {
-				if e.context.Skipped(lineNo, line.Text, rawRanges) {
-					e.printer.PrintContextLine(displayName, lineNo, line.Text, rawRanges)
+			line, err := lr.ReadLine()
+			if err != nil {
+				if err == io.EOF {
+					break
 				}
+				e.reportError(displayName, err)
+				return
 			}
-			continue
-		}
+			lineNo++
 
-		matched = true
-		count++
+			// rawRanges is what the pattern literally matched on this
+			// line, independent of -v. It's kept separate from the
+			// (possibly nil'd-out) ranges used for the *selected*
+			// line's own highlighting because a line excluded by -v can
+			// still surface later as a context line (see the -v+-C
+			// interaction test) and must highlight its own literal
+			// matches when it does — verified directly against real
+			// grep, which does exactly this.
+			rawRanges := e.matcher.Find(line.Text)
+			isMatch := len(rawRanges) > 0
+			ranges := rawRanges
+			if e.opts.InvertMatch {
+				isMatch = !isMatch
+				ranges = nil // nothing to highlight: the line was selected for NOT matching
+			}
 
-		switch e.mode {
-		case modeQuiet:
-			e.hadMatch = true
-			e.stopped = true
-			return
-		case modeListMatching, modeListNonMatching, modeCount:
-			// Tally only; the relevant one of these prints once, after
-			// the loop, based on the final matched/count values.
-		default: // modeNormal
-			if sniff.Binary {
-				if !binaryReported {
-					e.printer.PrintBinaryMatch(displayName)
-					binaryReported = true
+			if !isMatch {
+				if e.context != nil && e.mode == modeNormal && asText {
+					if e.context.Skipped(lineNo, line.Text, rawRanges) {
+						e.printer.PrintContextLine(displayName, lineNo, line.Text, rawRanges)
+					}
 				}
 				continue
 			}
-			if e.context != nil {
-				needSeparator, leading := e.context.Selected(lineNo)
-				if needSeparator {
-					e.printer.PrintContextSeparator()
+
+			matched = true
+			count++
+
+			switch e.mode {
+			case modeQuiet:
+				e.hadMatch = true
+				e.stopped = true
+				return
+			case modeListMatching, modeListNonMatching, modeCount:
+				// Tally only; the relevant one of these prints once,
+				// after the loop, based on the final matched/count
+				// values.
+			default: // modeNormal
+				if !asText {
+					if !binaryReported {
+						e.printer.PrintBinaryMatch(displayName)
+						binaryReported = true
+					}
+					continue
 				}
-				for _, l := range leading {
-					e.printer.PrintContextLine(displayName, l.lineNo, l.text, l.ranges)
+				if e.context != nil {
+					needSeparator, leading := e.context.Selected(lineNo)
+					if needSeparator {
+						e.printer.PrintContextSeparator()
+					}
+					for _, l := range leading {
+						e.printer.PrintContextLine(displayName, l.lineNo, l.text, l.ranges)
+					}
 				}
+				e.printer.PrintLine(displayName, lineNo, line.Text, ranges)
 			}
-			e.printer.PrintLine(displayName, lineNo, line.Text, ranges)
 		}
 	}
 
-	// hadMatch (which drives the overall exit code) must track each
-	// mode's own "selected something" criterion, not raw line-matching
-	// unconditionally — -L's whole point is selecting files that did
-	// NOT match, so its success condition is !matched, not matched.
-	// (Found via manual exercising, not from first-principles design:
-	// -L on a directory where every file matched was printing nothing,
-	// correctly, but still exiting 0 as if it had — see OUTPUT.md.)
+	// hadMatch (which drives the overall exit code) always tracks raw
+	// per-file line-matching, for every mode including -L — verified
+	// directly against real GNU grep, not assumed: -l/-L's exit status
+	// is identical to plain grep's own (0 iff the pattern matched *some*
+	// line in *some* file), completely independent of what -l/-L itself
+	// chooses to print. Concretely: `grep -L pat onlyfile` where onlyfile
+	// does NOT match still exits 1 ("no match"), even though -L prints
+	// onlyfile's name; conversely `grep -L pat a b` where only `a`
+	// matches (so -L prints only `b`) exits 0, because *something*
+	// matched, even though the file -L printed did not.
+	//
+	// An earlier version of this code got this backwards for -L
+	// specifically (`if !matched` instead of `if matched`), reasoning
+	// that -L's own "selection criterion" (which files get printed) and
+	// its exit-code criterion must be the same thing — they are not.
+	// That version was "confirmed" only by checking gg's own output
+	// looked plausible for a single hand-picked scenario (every file
+	// matching, so -L prints nothing) without cross-checking against
+	// real grep for that exact case, which — as it turns out — also
+	// exits 0 there (since every file *did* match), not the 1 that
+	// version asserted. See run_test.go's TestRun_FilesWithoutMatch_*
+	// tests for the full oracle-verified matrix this was corrected
+	// against.
 	switch e.mode {
 	case modeListMatching:
 		if matched {
@@ -229,8 +264,11 @@ func (e *engine) searchReader(displayName string, r io.Reader) {
 			e.printer.PrintFilename(displayName)
 		}
 	case modeListNonMatching:
-		if !matched {
+		// Printing criterion (list files that did NOT match) is
+		// deliberately independent of the exit-code criterion above.
+		if matched {
 			e.hadMatch = true
+		} else {
 			e.printer.PrintFilename(displayName)
 		}
 	case modeCount:

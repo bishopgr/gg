@@ -267,6 +267,30 @@ PS> gg --color=always -n ERROR app.log
 Markdown can't render the ANSI escape codes gg emits, but they're
 really there; see `internal/output`.)
 
+Search a binary file as if it were text (`-a`), instead of getting the
+default `Binary file X matches` message — here `data.bin` contains raw
+NUL-separated records:
+
+```powershell
+PS> gg field data.bin
+Binary file data.bin matches
+PS> gg -a field data.bin
+record1 field=42
+record2 field=99
+```
+
+(The embedded NUL bytes are real and preserved byte-for-byte in the
+output — they just render as blank space in a terminal/Markdown.) Or go
+the other way and skip binary files entirely with `-I`, as if they had
+no matches at all — useful when recursively grepping a directory that
+might contain build artifacts or other binary junk you never want
+touched:
+
+```powershell
+PS> gg -I field data.bin; $LASTEXITCODE
+1
+```
+
 ## STATUS
 
 Legend: ✅ done + tested · 🚧 built, not wired in · ⬜ not started
@@ -281,7 +305,7 @@ Legend: ✅ done + tested · 🚧 built, not wired in · ⬜ not started
 | Build-time version metadata (`-ldflags`) | ✅ | `internal/buildinfo` + `scripts/build.ps1` |
 | Matching engine (regex + fixed-string, `-i`/`-F`/`-w`/`-x`/`-v`) | ✅ | `internal/matcher`, wired into `grep.Run` |
 | Line-splitting (CRLF/LF/CR, no-trailing-newline) | ✅ | `internal/lineio`, wired into `grep.Run` |
-| Encoding/BOM detection, UTF-16 transcode, binary-match message | ✅ | `internal/encoding`, wired into `grep.Run`; no `-a`/`--text`/`-I` flag yet (see LIMITATIONS) |
+| Encoding/BOM detection, UTF-16 transcode, binary-match message, `-a`/`--text`/`-I` | ✅ | `internal/encoding` detects, `internal/grep`'s `BinaryMode` decides policy, wired into `grep.Run` — see OPTIONS below |
 | Recursive directory walk, glob expansion, `--include`/`--exclude`/`--exclude-dir` | ✅ | `internal/walker`, wired into `grep.Run` |
 | Terminal detection, Windows ANSI enabling, `--color` | ✅ | `internal/termenv` + `grep.resolveColor`, wired into `grep.Run` |
 | Output formatting (filename prefix, line numbers, `-o`, `-c`, `-l`/`-L`, color) | ✅ | `internal/output`, wired into `grep.Run` |
@@ -321,7 +345,8 @@ Legend: ✅ done + tested · 🚧 built, not wired in · ⬜ not started
 | `-e PATTERN`, `--regexp=PATTERN` | add `PATTERN` to the list of patterns to match (may be repeated) | ✅ |
 | `-f FILE`, `--file=FILE` | add patterns from `FILE`, one per line (may be repeated; `-` means stdin) | ✅ |
 | `-m NUM` | stop after `NUM` matches | ⬜ planned |
-| `-a`, `--text`, `-I` | force text mode / skip binary files entirely | ⬜ planned (binary files currently always print the `Binary file X matches` message, never raw lines, never skipped) |
+| `-a`, `--text` | treat binary files as text (raw content, not the `Binary file X matches` message) | ✅ |
+| `-I`, `--skip-binary` | skip binary files entirely, as if they had no matches (`--skip-binary` is gg's own long name — GNU grep's own `-I` has none) | ✅ |
 | `-z` | NUL-separated input/output | ⬜ planned |
 | `-P` (PCRE) | Perl-compatible regex | ⬜ non-goal — RE2 syntax only (PROCESS.md §1) |
 
@@ -364,6 +389,23 @@ literal empty-string pattern (matches every line), exactly like `-e ""`
 empty `-f` file and no `-e` at all) makes the search match *nothing*,
 not *everything* — also verified directly against real GNU grep, and the
 opposite of what compiling an actually-empty regex would do.
+
+**`-a`/`-I` behavior and precedence**: `-a`/`--text` treats a binary-
+detected file exactly like text — matching, `-A`/`-B`/`-C` context
+lines, `-v`, and normal output all behave as if the file were never
+flagged binary, raw NUL bytes and all. `-I` treats a binary-detected
+file as if it produced **no matches at all**, without reading any
+further: `-c` reports `0` for it, `-l` never lists it, `-L` always does
+— but (verified directly against real GNU grep, and the subject of a
+real bug found and fixed while implementing this — see PROCESS.md §8)
+`-L` listing it does **not** mean the overall exit code is "match found"
+— that always reflects whether the pattern matched *some* line in
+*some* file, identically to plain grep, regardless of what `-l`/`-L`
+itself printed. If both `-a` and `-I` are given, gg always has `-I` win
+— a deliberately simpler, documented rule than real GNU grep's true
+command-line-order last-one-wins behavior, which would require
+inspecting raw argument order for a combination unlikely to ever be
+given deliberately.
 
 Full phased rollout this table tracks:
 [PROCESS.md §1](PROCESS.md#1-decide-the-feature-surface-write-this-down-before-coding).
@@ -485,6 +527,38 @@ for the full rationale.
   argument becomes a `FILE`, verified directly against real GNU grep)
   before `Options` is even constructed, so this package only ever sees
   an already-decided, unambiguous pattern list.
+- **Binary file handling (`-a`/`--text`/`-I`)**: `Options.Binary`
+  (`BinaryMode`, `internal/grep/binary.go`) is checked once per file,
+  right after `encoding.Sniff`, against two independently-derived facts:
+  `asText` (treat the file as text — true whenever it isn't actually
+  binary, or `-a` says to pretend it isn't) gates both context-line
+  tracking and per-line printing; `skipBinary` (true only for `-I` on an
+  actually-binary file) skips the entire per-line loop outright, leaving
+  `matched`/`count` at their zero values so every mode's ordinary
+  end-of-function bookkeeping produces the right output *and* exit-code
+  contribution for free, without per-mode special-casing. Every
+  resulting behavior — `-a` composing normally with `-C`/`-v` (raw NUL
+  bytes and all), `-I` reporting `0` under `-c`, never listing under
+  `-l`, always listing under `-L`, and `-v` making no difference once a
+  file is skipped — was verified directly against real GNU grep, not
+  assumed. `-I` winning when both `-a` and `-I` are given is a
+  deliberately simpler, documented gg-specific rule, not an attempt at
+  real grep's true command-line-order precedence there (see LIMITATIONS).
+- **Real bug found and fixed while verifying `-I`+`-L` against real GNU
+  grep**: `-l`/`-L`'s exit code must always reflect raw per-file
+  matching — identical to plain grep's own criterion — completely
+  independent of which filenames `-l`/`-L` itself prints. A prior
+  version of this code set the exit-code flag from `-L`'s own *printing*
+  criterion (`!matched`) instead, which happens to look plausible for
+  the single scenario it was manually checked against (every file
+  matches → prints nothing → "should" exit no-match) but is
+  demonstrably wrong against real grep in general (e.g. two files where
+  only one matches: `-L` prints only the non-matching one, yet the
+  correct exit code is still "matched," since something, somewhere, did)
+  — see PROCESS.md §8 and `run_test.go`'s
+  `TestRun_FilesWithoutMatch_ExitCodeReflectsRawMatching` for the full
+  oracle-verified matrix, and `OUTPUT.md`'s FINDINGS section for the
+  original incorrect narrative and its correction.
 
 ### `internal/output` design (implemented)
 
@@ -608,8 +682,10 @@ for the full rationale.
   `TestSniff_UTF16LE_TranscodesAndIsNotFlaggedBinary`.
 - **Detection only, no policy**: `Sniff` reports `Result.Binary`; it does
   not skip the file or print `Binary file X matches` — that decision
-  needs to know about `-a`/`--text`/`-I`, which belong to the not-yet-built
-  `grep` engine, not this package.
+  belongs to `internal/grep`'s `BinaryMode` (`-a`/`--text`/`-I`), not
+  this package. `Sniff` itself is completely unchanged by those flags;
+  they only affect how `internal/grep.searchReader` reacts to the
+  `Result.Binary` fact it already reports.
 - Proven to compose with `lineio` as intended
   (`TestSniffThenLineio`): a UTF-16LE file with CRLF line endings splits
   into the same lines a plain UTF-8/LF file would.
@@ -796,7 +872,7 @@ go test ./...
   `PrintContextLine`/`PrintContextSeparator` coverage: the `-` vs `:`
   prefix distinction, highlighting a context line's own ranges, and
   `-o` suppressing context text while still allowing the separator.
-- `internal/grep` has ~70 tests covering the actual end-to-end wiring
+- `internal/grep` has ~78 tests covering the actual end-to-end wiring
   against real temp files: basic match/no-match, every matching flag
   (`-i`/`-F`/`-w`/`-x`/`-v`), every output-shape flag (`-n`/`-o`/`-c`/
   `-l`/`-L`/`-q` including the quiet-mode early-stop-before-reaching-a-
@@ -819,7 +895,14 @@ go test ./...
   end-to-end `Run` tests: literal-then-file combination order, blank
   lines becoming empty patterns, CRLF pattern files, a missing pattern
   file being a fatal returned error (not a per-file diagnostic), and the
-  empty-pattern-list-matches-nothing case, end to end.
+  empty-pattern-list-matches-nothing case, end to end. `-a`/`-I` add
+  their own set: `-a` composing normally with `-C`/`-v` against raw NUL
+  bytes, `-I` reporting `0` under `-c`/never listing under `-l`/always
+  listing under `-L`/making no difference under `-v`, and `-I` not
+  affecting other files in the same multi-file run — plus the corrected
+  `-l`/`-L` exit-code matrix
+  (`TestRun_FilesWithoutMatch_ExitCodeReflectsRawMatching`) from the real
+  bug found while verifying `-I`+`-L` (see PROCESS.md §8 and `OUTPUT.md`).
 - `internal/cli` has tests for the exit-code contract (`--version`/
   `--help`/no-args, and — via a swappable `runGrep` seam — all three of
   `ExitMatch`/`ExitNoMatch`/`ExitError` from a fake engine),
@@ -827,20 +910,23 @@ go test ./...
   reassignment (proven by checking the fake engine actually gets called
   instead of Cobra short-circuiting into help/version), `--color`'s
   GNU-style optional-value parsing (bare/`=always`/`=never`/`=auto`),
-  the `-l`/`-L` and `-h`/`-H` mutual-exclusion checks, and `-e`/`-f`'s
-  precedence rule specifically: a positional argument becoming a `FILE`
-  (never a second pattern) once `-e`/`-f` is given, and zero positional
+  the `-l`/`-L` and `-h`/`-H` mutual-exclusion checks, `-e`/`-f`'s
+  precedence rule specifically (a positional argument becoming a `FILE`,
+  never a second pattern, once `-e`/`-f` is given, and zero positional
   arguments being valid in that case even though a bare `PATTERN` is
-  still mandatory without them.
+  still mandatory without them), and `-a`/`-I`'s flag wiring including
+  gg's own "`-I` always wins if both are given" precedence rule.
 - `test/e2e` builds the real `gg` binary once (`TestMain`) and drives it
   as a subprocess for the scenarios only a real process boundary can
   validate: actual exit codes, actual stdio redirection, that `-h`/`-v`
   truly don't trigger Cobra's help/version machinery, that recursive
   search really does emit backslash-separated paths on Windows, that
   real stdout output never contains a stray `\r` byte, `-A`/`-B`/`-C`
-  context lines (including the precedence and explicit-zero cases), and
+  context lines (including the precedence and explicit-zero cases),
   `-e`/`-f` multi-pattern behavior (including the positional-arg-becomes-
-  a-FILE precedence rule and a missing pattern file's diagnostic).
+  a-FILE precedence rule and a missing pattern file's diagnostic),
+  `-a`/`-I` binary handling, and the corrected `-l`/`-L` exit-code
+  behavior against real files (not just the binary-skip interaction).
 - **Benchmarks** (PROCESS.md §4 step 8): `go test -bench . -benchmem
   ./internal/lineio/... ./internal/matcher/... ./internal/grep/...`
   covers the line-splitting hot path (LF/CRLF/bare-CR, plus the
@@ -869,10 +955,11 @@ Everything below is a genuine, deliberate gap — not a hidden one.
   (NUL-separated records).
 - **No PCRE** (`-P`): Go's `regexp` is RE2 — no backreferences, no
   lookaround. Stated non-goal for v1 (PROCESS.md §1), not an oversight.
-- **Binary files always print the `Binary file X matches` message**,
-  never raw line content, with no way to override it yet — there's no
-  `-a`/`--text`/`-I` flag. This is a real, if narrow, behavior gap: you
-  cannot currently force gg to search a binary file as text.
+- **No exact command-line-order precedence between `-a` and `-I`** when
+  both are given — gg always lets `-I` win, a simpler documented rule
+  than real GNU grep's true last-flag-wins behavior. Deferred rather
+  than tracking raw argument order for a combination unlikely to ever be
+  given deliberately.
 - **No-BOM UTF-16 is undetectable by design** (no reliable signature)
   and reads as mostly NUL-heavy garbage text — an accepted, documented
   gap (PROCESS.md §3.2), not a bug to chase.

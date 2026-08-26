@@ -377,3 +377,117 @@ func TestE2E_MissingPatternFileExitsTwoWithDiagnostic(t *testing.T) {
 		t.Errorf("stderr = %q, want it to mention the missing pattern file", r.stderr)
 	}
 }
+
+// --- binary file handling (-a/--text, -I) --------------------------------
+//
+// Expected output verified directly against real GNU grep (Git for
+// Windows' grep.exe) against identical input.
+
+func mustWriteBinaryFile(t *testing.T, dir, name string, content []byte) string {
+	t.Helper()
+	path := filepath.Join(dir, name)
+	if err := os.WriteFile(path, content, 0o644); err != nil {
+		t.Fatalf("WriteFile(%s): %v", path, err)
+	}
+	return path
+}
+
+func TestE2E_DefaultBinaryPrintsMatchMessage(t *testing.T) {
+	dir := t.TempDir()
+	path := mustWriteBinaryFile(t, dir, "data.bin", []byte("prefix\x00needle\x00suffix\n"))
+
+	r := run(t, "", "needle", path)
+	if r.exitCode != 0 {
+		t.Fatalf("exit code = %d, want 0; stderr=%q", r.exitCode, r.stderr)
+	}
+	want := "Binary file " + path + " matches\n"
+	if r.stdout != want {
+		t.Errorf("stdout = %q, want %q", r.stdout, want)
+	}
+}
+
+func TestE2E_TextFlagPrintsRawBinaryContent(t *testing.T) {
+	dir := t.TempDir()
+	path := mustWriteBinaryFile(t, dir, "data.bin", []byte("prefix\x00needle\x00suffix\n"))
+
+	r := run(t, "", "-a", "needle", path)
+	if r.exitCode != 0 {
+		t.Fatalf("exit code = %d, want 0; stderr=%q", r.exitCode, r.stderr)
+	}
+	want := "prefix\x00needle\x00suffix\n"
+	if r.stdout != want {
+		t.Errorf("stdout = %q, want %q", r.stdout, want)
+	}
+}
+
+func TestE2E_SkipBinarySkipsFileEntirely(t *testing.T) {
+	dir := t.TempDir()
+	path := mustWriteBinaryFile(t, dir, "data.bin", []byte("prefix\x00needle\x00suffix\n"))
+
+	r := run(t, "", "-I", "needle", path)
+	if r.exitCode != 1 {
+		t.Errorf("exit code = %d, want 1 (skipped file counts as no match)", r.exitCode)
+	}
+	if r.stdout != "" {
+		t.Errorf("stdout = %q, want empty", r.stdout)
+	}
+}
+
+// TestE2E_SkipBinaryWithFilesWithoutMatchListsButExitsNoMatch is the
+// real-process proof of this feature's own -L exit-code fix: -I -L
+// prints the skipped binary file's name, but exits 1 (no match), not 0
+// — verified directly against real GNU grep.
+func TestE2E_SkipBinaryWithFilesWithoutMatchListsButExitsNoMatch(t *testing.T) {
+	dir := t.TempDir()
+	path := mustWriteBinaryFile(t, dir, "data.bin", []byte("prefix\x00needle\x00suffix\n"))
+
+	r := run(t, "", "-I", "-L", "needle", path)
+	if r.exitCode != 1 {
+		t.Errorf("exit code = %d, want 1", r.exitCode)
+	}
+	if r.stdout != path+"\n" {
+		t.Errorf("stdout = %q, want %q", r.stdout, path+"\n")
+	}
+}
+
+// --- -L exit-code fix (independent of -I) --------------------------------
+//
+// Real-process regression coverage for the -L exit-code bug found and
+// fixed alongside -a/-I — see internal/grep/run_test.go's
+// TestRun_FilesWithoutMatch_ExitCodeReflectsRawMatching for the full
+// oracle-verified matrix this is drawn from.
+
+func TestE2E_FilesWithoutMatch_SingleNonMatchingFileExitsNoMatch(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "a.txt")
+	if err := os.WriteFile(path, []byte("nope\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	r := run(t, "", "-L", "match", path)
+	if r.exitCode != 1 {
+		t.Errorf("exit code = %d, want 1 (printing a filename under -L does not imply a match)", r.exitCode)
+	}
+	if r.stdout != path+"\n" {
+		t.Errorf("stdout = %q, want %q", r.stdout, path+"\n")
+	}
+}
+
+func TestE2E_FilesWithoutMatch_EveryFileMatchingExitsMatchWithNoOutput(t *testing.T) {
+	dir := t.TempDir()
+	a := filepath.Join(dir, "a.txt")
+	b := filepath.Join(dir, "b.txt")
+	for _, p := range []string{a, b} {
+		if err := os.WriteFile(p, []byte("match\n"), 0o644); err != nil {
+			t.Fatalf("WriteFile: %v", err)
+		}
+	}
+
+	r := run(t, "", "-L", "match", a, b)
+	if r.exitCode != 0 {
+		t.Errorf("exit code = %d, want 0 (something matched, even though -L prints nothing)", r.exitCode)
+	}
+	if r.stdout != "" {
+		t.Errorf("stdout = %q, want empty", r.stdout)
+	}
+}
