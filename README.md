@@ -242,6 +242,11 @@ go test ./...
 - No-BOM UTF-16 is undetectable by design (no reliable signature) and
   will be read as (mostly) NUL-heavy garbage text — an accepted,
   documented gap, not a bug to chase.
+- Output line-ending is **decided but not yet enforced**: gg will always
+  write a bare `\n` after every printed line, regardless of the source
+  file's terminator or platform (PROCESS.md §3.1) — but there is no
+  output layer yet to actually do that. `internal/lineio.Terminator`
+  records the source fact only and explicitly does not drive this.
 
 ## SEE ALSO
 

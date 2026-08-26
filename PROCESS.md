@@ -98,16 +98,34 @@ chasing feature parity or performance.
 ### 3.1 Line endings
 - Do not split on `\n` alone and call it done. Detect and handle `\r\n`,
   `\n`, and bare `\r` (old Mac / some tool output) per line, and preserve
-  whether a trailing newline existed on the last line (grep echoes files
-  without a final newline correctly, and warns via a specific message in
-  some modes — decide whether to replicate that or simplify; write the
-  decision down).
-- `-o`/normal output: strip the line terminator before printing, then emit
-  `\n` (Go's `fmt`) or the OS terminator — **decide and document**: GNU
-  grep always emits `\n` regardless of platform when writing to a pipe;
-  match that for pipe-friendliness, not `\r\n`.
+  whether a trailing newline existed on the last line.
+  **Decided:** `internal/lineio.Reader` tracks this per line as
+  `Terminator` (`LF`/`CRLF`/`CR`/`NoTerminator`) purely as a fact about
+  the source — it is not used to decide output formatting (see below),
+  and gg does not replicate `diff`'s "\ No newline at end of file"-style
+  warning; that's a `diff` behavior, not something grep itself does, and
+  it isn't a goal here. Implemented and tested — see `internal/lineio`.
+- `-o`/normal output: strip the line terminator before printing, then
+  emit a terminator on the way out.
+  **Decided:** gg always emits a bare `\n` after every printed line —
+  matched lines, context lines, everything — regardless of the *source*
+  line's terminator (`CRLF`/`CR`/`NoTerminator` all normalize to `\n` on
+  output) and regardless of platform. Rationale: pipe-friendliness
+  (composing with other tools) matters more than mirroring the input
+  file's convention, this matches GNU grep's own real-world behavior,
+  and it's simpler — one code path, no OS branch. This also means: no
+  `\r\n` is ever written, even on Windows, and even for a source line
+  that had no trailing newline at all. Not yet implemented — this is a
+  decision for `internal/output` (§4 step 6) to apply; recorded here now
+  so that package doesn't have to re-derive it.
 - Build a `test/testdata/crlf.txt` and `lf.txt` with identical content and
   assert identical match output modulo the terminator question above.
+  **Done at the `lineio` level**: `crlf.txt`/`lf.txt`/
+  `no-trailing-newline.txt`/`cr.txt`/`empty.txt` exist under
+  `test/testdata/` and `internal/lineio`'s tests assert `crlf.txt` and
+  `lf.txt` produce byte-identical line *content*. The full "identical
+  match *output*" assertion (through matcher + output formatting) is
+  still pending on `internal/grep`/`internal/output` (§4 steps 4 and 6).
 
 ### 3.2 Encoding & BOM
 - UTF-8 is the baseline. Explicitly decide behavior for a UTF-8 BOM
@@ -281,7 +299,7 @@ Fill in as choices are made; each row should reference the section above.
 | Regex engine | Go `regexp` (RE2) only for v1? | §1 |
 | UTF-16 handling | **Decided:** detect via BOM (LE/BE) and transcode to UTF-8 via `golang.org/x/text/encoding/unicode`, streaming (no whole-file read). No-BOM UTF-16 is undetectable by design (no reliable signature) and falls through to the plain NUL-byte binary heuristic — this is a known, accepted gap, not an oversight. `internal/encoding.Sniff`. | §3.2 |
 | Binary-detection heuristic | **Decided:** NUL byte anywhere in an 8000-byte prefix (mirrors Git's `buffer_is_binary`), skipped entirely (forced `Binary: false`) when a UTF-16 BOM was positively identified, since UTF-16 ASCII text is legitimately full of zero bytes. Detection only — the skip/`--text` *policy* is deferred to the engine wiring step. `internal/encoding.Sniff` | §3.2 |
-| Trailing newline emission | always `\n` vs. OS-native | §3.1 |
+| Trailing newline emission | **Decided:** always `\n` on output, regardless of source terminator or platform — never `\r\n`, never omitted, no `diff`-style "no newline" warning. Not yet implemented (belongs to `internal/output`, §4 step 6); recorded ahead of that package existing. | §3.1 |
 | Symlink recursion default | follow / don't follow | §3.4 |
 | Color library | `x/term` + hand-rolled vs. `go-colorable`/`termenv` | §3.3 |
 | Long path support | rely on Go runtime vs. explicit `\\?\` handling | §3.4 |

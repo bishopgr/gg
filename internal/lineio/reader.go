@@ -19,6 +19,12 @@ import (
 // Callers that need to reproduce input byte-for-byte (or make a
 // deliberate normalization decision) need this — silently assuming '\n'
 // loses information.
+//
+// Note for output formatting: this is a fact about the *source*, not a
+// signal for how gg should format output. PROCESS.md §3.1 decides that
+// gg always writes a bare '\n' after every printed line regardless of
+// this value — Terminator exists for detection/reconstruction, not to
+// drive the (not-yet-built) output layer's line-ending choice.
 type Terminator int
 
 const (
