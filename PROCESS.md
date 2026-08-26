@@ -349,7 +349,10 @@ Status legend: ✅ done · 🚧 partially done · ⬜ not started.
    blindly. Benchmarks live alongside the packages they measure
    (`internal/lineio/bench_test.go`, `internal/matcher/bench_test.go`,
    `internal/grep/bench_test.go`) so they keep running as regression
-   guards, not one-off scratch scripts.
+   guards, not one-off scratch scripts. See
+   [BENCHMARK.md](BENCHMARK.md) for a full before/after comparison
+   against the pre-performance-pass branch (`benchstat`-backed, not
+   eyeballed), including the two rejected intermediate designs.
    - **`internal/lineio.Reader.ReadLine` — the actual hot path, found by
      profiling, not guessed.** The original implementation scanned
      byte-by-byte via `bufio.Reader.ReadByte` into a `bytes.Buffer`

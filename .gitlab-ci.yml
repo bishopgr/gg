@@ -1,0 +1,85 @@
+# GitLab CI for gg.
+#
+# Two stages, matching what was actually asked for — not the full
+# PROCESS.md §6 aspirational matrix (windows-latest/ubuntu-latest/
+# macos-latest via GitHub Actions, go vet + staticcheck/golangci-lint +
+# `-race`): this only wires a single Linux test job and a tag-gated
+# GoReleaser release job. Notably, this project is Windows-first
+# (PROCESS.md §0/§3) but this pipeline only ever tests on Linux
+# (whatever `golang:` image + shared runners provide) — there's no
+# Windows-tagged runner assumed to exist here. That's a real gap, not a
+# hidden one: flagging it rather than pretending this replaces manual
+# Windows verification.
+stages:
+  - test
+  - release
+
+variables:
+  # GoReleaser needs full tag history for `git describe` and its
+  # changelog (commit range since the previous tag) — a shallow clone
+  # (GitLab's default) breaks both silently rather than erroring
+  # loudly, which is worse.
+  GIT_DEPTH: "0"
+  GOPATH: "$CI_PROJECT_DIR/.cache/go"
+  GOMODCACHE: "$CI_PROJECT_DIR/.cache/gomod"
+
+.go-cache: &go-cache
+  cache:
+    key:
+      files:
+        - go.sum
+    paths:
+      - .cache/gomod
+
+test:
+  stage: test
+  image: golang:1.26.2
+  <<: *go-cache
+  script:
+    # Mirrors README.md's TESTING section exactly: `go vet` then
+    # `go test`, plus `-race` and coverage instrumentation on top.
+    - go vet ./...
+    - go test -race -coverprofile=coverage.out -covermode=atomic ./...
+    - go tool cover -func=coverage.out
+    # Cobertura XML so GitLab can annotate merge request diffs with
+    # per-line coverage, not just show the summary percentage below.
+    - go install github.com/boumenot/gocover-cobertura@latest
+    - gocover-cobertura < coverage.out > coverage.xml
+  # Regex GitLab scrapes from the job log to populate the pipeline's
+  # coverage percentage (visible in the MR widget and, if configured,
+  # a project badge). Matches `go tool cover -func`'s final summary
+  # line, e.g. "total:            (statements)          82.4%".
+  coverage: '/total:\s+\(statements\)\s+\d+\.\d+%/'
+  artifacts:
+    when: always
+    expire_in: 1 week
+    paths:
+      - coverage.out
+    reports:
+      coverage_report:
+        coverage_format: cobertura
+        path: coverage.xml
+
+# Runs `goreleaser release` against a tag push. Deliberately gated to
+# tags only: GoReleaser's whole model is "build/package/publish exactly
+# what's at this tag," so running it on every branch commit would just
+# fail (nothing to describe) or, worse, publish spurious releases.
+release:
+  stage: release
+  image: goreleaser/goreleaser:latest
+  variables:
+    # Simplest working setup: GitLab's CI job token, scoped to this
+    # project automatically, needs no manually-created/rotated secret.
+    # `use_job_token: true` in .goreleaser.yml's gitlab_urls tells
+    # GoReleaser to authenticate accordingly.
+    #
+    # If this project's GitLab version/settings restrict job tokens'
+    # Releases-API access, replace this with a project or personal
+    # access token (`api` scope) stored as a masked, protected
+    # GITLAB_TOKEN CI/CD variable instead, remove this line, and flip
+    # `use_job_token` to `false` in .goreleaser.yml.
+    GITLAB_TOKEN: $CI_JOB_TOKEN
+  script:
+    - goreleaser release --clean
+  rules:
+    - if: '$CI_COMMIT_TAG'

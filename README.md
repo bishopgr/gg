@@ -546,5 +546,7 @@ Everything below is a genuine, deliberate gap — not a hidden one.
 ## SEE ALSO
 
 - [PROCESS.md](PROCESS.md) — full design and build plan this project follows
+- [BENCHMARK.md](BENCHMARK.md) — before/after measurements for the
+  PROCESS.md §4 step 8 performance pass
 - `grep(1)`, `regexp/syntax` (Go's RE2 syntax reference:
   <https://github.com/google/re2/wiki/Syntax>)

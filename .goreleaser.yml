@@ -1,0 +1,103 @@
+# GoReleaser config for gg — see PROCESS.md §7 (Packaging & distribution)
+# for the decisions this encodes: a GOOS/GOARCH matrix limited to the
+# platforms actually called out there (windows/amd64, windows/arm64,
+# linux/amd64, darwin/arm64 — not a "build everything" matrix), plain
+# archives (no MSI/winget/scoop manifests yet — PROCESS.md §7 explicitly
+# defers those as a "later" item, not something to invent speculatively
+# here), and version metadata wired into the same internal/buildinfo
+# vars scripts/build.ps1 already populates for local builds.
+#
+# Invoked by .gitlab-ci.yml's `release` job on tag pipelines via
+# `goreleaser release --clean`. See that file for the GITLAB_TOKEN /
+# gitlab_urls wiring this config's `release.gitlab` section depends on.
+version: 2
+
+project_name: gg
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: gg
+    main: ./cmd/gg
+    binary: gg
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - windows
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    # PROCESS.md §7's stated matrix is windows/{amd64,arm64},
+    # linux/amd64, darwin/arm64 — not the full 3x2 cross product.
+    # linux/arm64 and darwin/amd64 are intentionally excluded here
+    # rather than added speculatively; widen this if/when that's an
+    # actual decision, not a default.
+    ignore:
+      - goos: linux
+        goarch: arm64
+      - goos: darwin
+        goarch: amd64
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+      - -X gg/internal/buildinfo.Version={{ .Version }}
+      - -X gg/internal/buildinfo.Commit={{ .ShortCommit }}
+      - -X gg/internal/buildinfo.Date={{ .Date }}
+
+archives:
+  - id: gg
+    ids: [gg]
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+    # zip on Windows (the platform this project targets first), tar.gz
+    # everywhere else — the conventional split, per PROCESS.md §7.
+    formats: [tar.gz]
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    # No `files:` override: GoReleaser's default already picks up
+    # README*/LICENSE*/CHANGELOG* if present. There is currently no
+    # LICENSE file in this repo — see the open question in PROCESS.md
+    # §7 ("confirm the binary/command name collision story") — so
+    # archives will just contain the binary + README until that's
+    # resolved; not something to paper over here.
+
+checksum:
+  name_template: "checksums.txt"
+
+snapshot:
+  version_template: "{{ .Tag }}-next"
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^test:"
+      - "^chore:"
+      - "^docs:"
+
+release:
+  gitlab:
+    # PROCESS.md §7 hasn't finalized `gg`'s distribution name yet
+    # ("confirm before locking the name into packaging manifests") —
+    # this only targets this project's own GitLab release page, not
+    # any external package manager, so it isn't blocked on that.
+    owner: archbishop-software/apps
+    name: gg
+
+# Required for a self-hosted (non-gitlab.com) instance — see
+# .gitlab-ci.yml, which sources these from GitLab's own predefined
+# CI_API_V4_URL/CI_SERVER_URL variables rather than a hardcoded host,
+# so this file has no knowledge of the instance's actual address.
+gitlab_urls:
+  api: "{{ .Env.CI_API_V4_URL }}"
+  download: "{{ .Env.CI_SERVER_URL }}"
+  # See .gitlab-ci.yml's release job comment: this assumes GITLAB_TOKEN
+  # is CI_JOB_TOKEN (zero extra secret setup). Set this to false if a
+  # dedicated personal/project access token is used instead.
+  use_job_token: true
