@@ -29,8 +29,6 @@ explicit, honest gaps (context lines, `-e`/`-f`, PCRE, etc.).
 `gg` searches `FILE`(s) for lines matching `PATTERN` and prints them.
 When no `FILE` is given, or `FILE` is `-`, `gg` reads standard input.
 
-Examples:
-
 ```powershell
 gg error app.log                    # search one file
 gg -i "warn|error" app.log           # case-insensitive, alternation
@@ -42,6 +40,180 @@ gg -o "\d+" app.log                  # only the matched substrings
 Get-Content app.log | gg error       # read from stdin
 gg --include=*.go -r TODO .          # only search .go files
 ```
+
+See [EXAMPLES](#examples) below for a walkthrough with real, verified
+output, from single-file searches up through combining several flags at
+once.
+
+## EXAMPLES
+
+Every command and output block below was actually run against `gg.exe`
+built from this repo (`go build -o bin/gg.exe ./cmd/gg`) — copy-pasted,
+not invented. They assume a working directory shaped like this:
+
+```
+.
+├── app.log
+├── src
+│   ├── main.go
+│   └── util
+│       └── util.go
+└── vendor
+    └── thirdparty.go
+```
+
+`app.log`:
+
+```
+2024-01-01T10:00:00 INFO  starting service
+2024-01-01T10:00:01 WARN  cache miss for key=42
+2024-01-01T10:00:02 ERROR failed to connect to db: timeout
+2024-01-01T10:00:03 INFO  retrying connection
+2024-01-01T10:00:04 ERROR failed to connect to db: timeout
+2024-01-01T10:00:05 INFO  connected
+```
+
+`src\main.go` and `src\util\util.go` each have a `// TODO: ...` comment
+line; `vendor\thirdparty.go` has one too, to demonstrate excluding it.
+
+### Simple
+
+Search one file for a literal-looking pattern:
+
+```powershell
+PS> gg ERROR app.log
+2024-01-01T10:00:02 ERROR failed to connect to db: timeout
+2024-01-01T10:00:04 ERROR failed to connect to db: timeout
+```
+
+Case-insensitive search (`-i`):
+
+```powershell
+PS> gg -i warn app.log
+2024-01-01T10:00:01 WARN  cache miss for key=42
+```
+
+Count matching lines instead of printing them (`-c`):
+
+```powershell
+PS> gg -c ERROR app.log
+2
+```
+
+Read from standard input instead of a file:
+
+```powershell
+PS> Get-Content app.log | gg -ci error
+2
+```
+
+### Medium
+
+Invert the match to see everything that *isn't* an error (`-v`):
+
+```powershell
+PS> gg -v INFO app.log
+2024-01-01T10:00:01 WARN  cache miss for key=42
+2024-01-01T10:00:02 ERROR failed to connect to db: timeout
+2024-01-01T10:00:04 ERROR failed to connect to db: timeout
+```
+
+Prefix matches with their line number, and require a whole-word match
+(`-n -w`, so this wouldn't match e.g. `ERRORS`):
+
+```powershell
+PS> gg -n -w ERROR app.log
+3:2024-01-01T10:00:02 ERROR failed to connect to db: timeout
+5:2024-01-01T10:00:04 ERROR failed to connect to db: timeout
+```
+
+Extract just the matched substring with a regex, instead of whole lines
+(`-o`) — here, pulling out every date:
+
+```powershell
+PS> gg -o "\d{4}-\d{2}-\d{2}" app.log
+2024-01-01
+2024-01-01
+2024-01-01
+2024-01-01
+2024-01-01
+2024-01-01
+```
+
+Recurse into a directory tree, with line numbers (`-r -n`, combined as
+`-rn`):
+
+```powershell
+PS> gg -rn TODO .
+src\main.go:3:// TODO: add graceful shutdown
+src\util\util.go:3:// TODO: replace with a real implementation
+vendor\thirdparty.go:2:// TODO: this should never show up in results
+```
+
+Same search, but only print the filenames that matched (`-rl`):
+
+```powershell
+PS> gg -rl TODO .
+src\main.go
+src\util\util.go
+vendor\thirdparty.go
+```
+
+### Complex
+
+Skip a whole directory while recursing (`--exclude-dir`) — useful for
+keeping `vendor`, `node_modules`, `.git`, etc. out of results:
+
+```powershell
+PS> gg -rn --exclude-dir=vendor TODO .
+src\main.go:3:// TODO: add graceful shutdown
+src\util\util.go:3:// TODO: replace with a real implementation
+```
+
+Combine several flags at once — recursive, case-insensitive, only `.go`
+files, excluding `vendor`, with line numbers — to find every TODO in
+first-party Go source and nowhere else:
+
+```powershell
+PS> gg -rni --include=*.go --exclude-dir=vendor "todo" .
+src\main.go:3:// TODO: add graceful shutdown
+src\util\util.go:3:// TODO: replace with a real implementation
+```
+
+Anchor a whole-line match (`-x`), e.g. to assert a file's first line is
+*exactly* `package main` and nothing else on that line:
+
+```powershell
+PS> gg -x "package main" src\main.go
+package main
+```
+
+Use `gg` purely for its exit code in a script or CI check (`-q`
+suppresses all output and stops at the first match) — `0` means found,
+`1` means not found:
+
+```powershell
+PS> gg -q ERROR app.log; $LASTEXITCODE
+0
+PS> gg -q nomatch app.log; $LASTEXITCODE
+1
+```
+
+Force color even when output isn't a terminal (e.g. piping to a file
+you'll view later with a color-aware viewer) — GNU-style `--color`
+resolution means bare `--color`, `--color=always`, and `--color=auto`
+piped to a real terminal all highlight the match, here shown against
+`-n`:
+
+```powershell
+PS> gg --color=always -n ERROR app.log
+3:2024-01-01T10:00:02 ERROR failed to connect to db: timeout
+5:2024-01-01T10:00:04 ERROR failed to connect to db: timeout
+```
+
+(In an actual terminal, `ERROR` renders bold red in that output —
+Markdown can't render the ANSI escape codes gg emits, but they're
+really there; see `internal/output`.)
 
 ## STATUS
 
