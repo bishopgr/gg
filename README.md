@@ -38,7 +38,8 @@ Legend: ✅ done + tested · 🚧 built, not wired in · ⬜ not started
 | Matching engine (`Matcher` interface, fixed-string + regex impls) | ✅ | `internal/matcher` — table + fuzz tested, **not yet reachable from the CLI** |
 | CLI flags for matching (`-i -v -F -w -x -e -f ...`) | 🚧 | `matcher.Options` supports `-i`/`-F`/`-w`/`-x` already; no Cobra flags expose them yet |
 | Actual search execution (`gg PATTERN FILE` producing output) | ⬜ | `grep.Run` is a stub that always returns `(ExitError, "not yet implemented")` |
-| Line-splitting reader (CRLF/LF/CR, BOM, binary detection) | ⬜ | `internal/lineio` — next step |
+| Line-splitting reader (CRLF/LF/CR, no-trailing-newline) | ✅ | `internal/lineio` — table + fuzz tested, **not yet reachable from the CLI** |
+| Encoding/BOM handling, binary-file detection | ⬜ | PROCESS.md §3.2 — separate concern, deliberately not in `lineio` |
 | Recursive directory walk, `--include`/`--exclude` | ⬜ | `internal/walker` |
 | Output formatting (filename prefix, line numbers, context, color) | ⬜ | `internal/output` |
 
@@ -100,7 +101,7 @@ internal/cli/         Cobra command tree, flag parsing only               [done:
 internal/grep/         composition root: Run(opts) (exitCode int, err error) [stub]
 internal/matcher/      pattern matching: fixed-string + regex, no I/O     [done]
 internal/buildinfo/    Version/Commit/Date via -ldflags                   [done]
-internal/lineio/       CRLF/LF/CR + BOM + binary-safe line reader         [not started]
+internal/lineio/       CRLF/LF/CR line splitting, streaming, no length cap [done]
 internal/walker/       file/dir traversal, include/exclude globs         [not started]
 internal/output/       printer: plain/color, context, filename prefixing [not started]
 internal/termenv/      Windows console-mode / isatty handling            [not started]
@@ -127,6 +128,30 @@ rationale.
 - **RE2, not PCRE**: no backreferences, no lookaround. This is a stated
   non-goal for v1 (PROCESS.md §1), not an oversight.
 
+### `internal/lineio` design (implemented)
+
+- A single `Reader` type wraps `bufio.Reader` and recognizes `\n`,
+  `\r\n`, and bare `\r` as line terminators, returning each line's raw
+  `Text` plus which `Terminator` followed it (`LF`/`CRLF`/`CR`/
+  `NoTerminator`) — no terminator is ever silently assumed.
+- **No maximum line length**, unlike `bufio.Scanner`'s default 64KiB
+  token cap — verified with a test line >5x the internal buffer size.
+  Deliberate tradeoff: correctness/simplicity (byte-by-byte scanning)
+  over throughput for now, called out in the package doc as the
+  specific thing to revisit in the PROCESS.md §4 step-8 performance pass.
+- **`Reset(io.Reader)`** lets one `Reader` (and its internal buffers) be
+  reused across many files — set up now so the future `walker`-driven
+  multi-file loop doesn't allocate a fresh reader per file.
+- Fixtures proving the actual concern in PROCESS.md §3.1 — that CRLF and
+  LF files must produce *identical line content* — live in
+  `test/testdata/` (`crlf.txt`, `lf.txt`, `no-trailing-newline.txt`,
+  `cr.txt`, `empty.txt`) and are asserted byte-exact via `[]byte` (not
+  string-literal source, which could get silently re-encoded).
+- Round-trip fuzzed (`FuzzReader_RoundTrip`, ~1.3M executions): for
+  arbitrary bytes — including invalid UTF-8 and embedded NULs —
+  concatenating every line's `Text` + `Terminator.Bytes()` must
+  reconstruct the original input exactly.
+
 ## BUILDING
 
 ```powershell
@@ -151,6 +176,10 @@ go test ./...
   `regexMatcher(QuoteMeta(pattern))` agree wherever their behavior is
   supposed to overlap, and a fuzz target (`FuzzNew`) exercised for
   ~1M generated executions with zero panics.
+- `internal/lineio` has table-driven tests covering every terminator
+  combination (including adjacent/degenerate cases like `"\r\r\n"`), the
+  `test/testdata/` fixtures above, an arbitrarily-long-line test, and a
+  byte-perfect round-trip fuzz target (~1.3M executions, zero mismatches).
 - `go test -race` currently fails **locally** on this machine with
   `0xc0000139` — that's an incompatible `gcc` (Strawberry Perl's, found
   first on `PATH`) rather than a code issue; GitHub Actions'
@@ -162,8 +191,11 @@ go test ./...
 - Does not yet search anything — `gg PATTERN FILE` exits `2`.
 - No recursive directory search, no globbing, no color output.
 - No PCRE (backreferences/lookaround); RE2 syntax only.
-- No encoding detection yet (UTF-16, non-UTF-8 BOM handling — see
-  PROCESS.md §3.2).
+- No encoding detection yet (UTF-8 BOM stripping, UTF-16, binary-file
+  detection — PROCESS.md §3.2). `lineio.Reader` treats all input as raw
+  bytes; a UTF-8 BOM would currently show up as leading garbage on the
+  first line's `Text`, and a UTF-16 file would read as (mostly) blank
+  lines full of NUL bytes. Both are the next step, not yet started.
 
 ## SEE ALSO
 
