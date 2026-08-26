@@ -1,6 +1,7 @@
 package encoding_test
 
 import (
+	"bufio"
 	"bytes"
 	"io"
 	"testing"
@@ -11,6 +12,33 @@ import (
 	"gg/internal/encoding"
 	"gg/internal/lineio"
 )
+
+// TestSniffThenLineio_NoDoubleBuffering pins down the PROCESS.md §4
+// step 8 fix directly at the real composition point (rather than only
+// in internal/lineio's own white-box test): the *bufio.Reader Sniff
+// hands back for non-UTF-16 content must be sized so that
+// lineio.NewReader recognizes and reuses it instead of layering a
+// second buffer on top, which would otherwise cap every downstream
+// fill at whatever Sniff's own buffer returns per Read.
+func TestSniffThenLineio_NoDoubleBuffering(t *testing.T) {
+	_, r := encoding.Sniff(bytes.NewReader([]byte("plain ascii, no BOM\n")))
+
+	br, ok := r.(*bufio.Reader)
+	if !ok {
+		t.Fatalf("Sniff's returned Reader is %T, want *bufio.Reader (required for lineio.NewReader's reuse check)", r)
+	}
+	if br.Size() < lineio.DefaultBufSize {
+		t.Fatalf("Sniff's buffer capacity = %d, want >= lineio.DefaultBufSize (%d) so lineio.NewReader reuses it directly", br.Size(), lineio.DefaultBufSize)
+	}
+
+	lr := lineio.NewReader(r)
+	if lr.Buffered() != br.Buffered() {
+		// Buffered() delegates straight through when the same
+		// *bufio.Reader is reused; a mismatch means lineio.NewReader
+		// wrapped it in a second bufio.Reader instead of reusing it.
+		t.Fatalf("lineio.NewReader appears to have wrapped Sniff's Reader in a second buffer (Buffered() = %d, want %d)", lr.Buffered(), br.Buffered())
+	}
+}
 
 // TestSniffThenLineio proves the intended composition from PROCESS.md
 // §3.2: Sniff transcodes/strips first, and its output Reader feeds

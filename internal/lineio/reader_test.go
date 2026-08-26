@@ -1,6 +1,7 @@
 package lineio
 
 import (
+	"bufio"
 	"io"
 	"os"
 	"path/filepath"
@@ -155,6 +156,34 @@ func TestReadLine_TextCopiedBeforeNextCall(t *testing.T) {
 
 	if string(first) != "first" {
 		t.Fatalf("copied first line = %q, want %q (aliasing leaked across calls)", first, "first")
+	}
+}
+
+// TestNewReader_ReusesAlreadyBufferedReader pins down the
+// double-buffering fix from PROCESS.md §4 step 8: when the input is
+// already a *bufio.Reader with at least DefaultBufSize of capacity
+// (the shape internal/encoding.Sniff hands off), NewReader must reuse
+// it directly rather than wrapping it in a second bufio.Reader — a
+// white-box check (same package) since the wrapping decision has no
+// externally-observable side effect other than performance.
+func TestNewReader_ReusesAlreadyBufferedReader(t *testing.T) {
+	br := bufio.NewReaderSize(strings.NewReader("a\nb\n"), DefaultBufSize)
+	r := NewReader(br)
+	if r.br != br {
+		t.Fatal("NewReader wrapped an already-adequately-buffered *bufio.Reader instead of reusing it")
+	}
+}
+
+// TestNewReader_WrapsUndersizedBufferedReader is
+// TestNewReader_ReusesAlreadyBufferedReader's negative case: a
+// *bufio.Reader smaller than DefaultBufSize (e.g. internal/encoding's
+// own 8000-byte sniff buffer, before it was sized up to match) must
+// still get wrapped, not reused as-is at a throughput-limiting size.
+func TestNewReader_WrapsUndersizedBufferedReader(t *testing.T) {
+	br := bufio.NewReaderSize(strings.NewReader("a\nb\n"), DefaultBufSize/2)
+	r := NewReader(br)
+	if r.br == br {
+		t.Fatal("NewReader reused an undersized *bufio.Reader instead of wrapping it")
 	}
 }
 

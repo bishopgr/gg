@@ -12,6 +12,11 @@
 *.test
 *.out
 
+# Profiling (not the racial kind)
+cpu
+cpu.prof
+
+
 # Test binary, built with `go test -c`
 *.test
 
