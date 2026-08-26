@@ -65,6 +65,26 @@ var (
 // executables) from their first chunk.
 const sniffLen = 8000
 
+// sniffBufSize is the capacity of the bufio.Reader Sniff constructs —
+// deliberately larger than sniffLen. It's set to match
+// lineio.DefaultBufSize (duplicated as a literal rather than imported,
+// to avoid this package depending on lineio just for a tuning constant)
+// so that lineio.NewReader, given Sniff's returned Reader directly, can
+// recognize it as already adequately buffered and reuse it instead of
+// wrapping it in a second bufio.Reader. PROCESS.md §4 step 8
+// (performance pass): profiling the full source->Sniff->lineio pipeline
+// showed the previous sniffLen-sized (8000-byte) buffer capping every
+// downstream fill to at most 8000 bytes per underlying Read call, since
+// an outer bufio.Reader's fill can't get more from an io.Reader than
+// that Reader's own Read call returns in one shot — turning what should
+// be one 64KB read into several smaller ones.
+const sniffBufSize = lineioDefaultBufSize
+
+// lineioDefaultBufSize mirrors internal/lineio.DefaultBufSize — see
+// sniffBufSize's doc comment for why this is a literal duplicate
+// instead of an import.
+const lineioDefaultBufSize = 64 * 1024
+
 // Result describes what Sniff found at the start of a stream.
 type Result struct {
 	// BOM is the byte-order mark detected and stripped, if any.
@@ -87,7 +107,7 @@ type Result struct {
 // reads the rest of r eagerly, so it is safe to use on arbitrarily large
 // or slow/streaming inputs.
 func Sniff(r io.Reader) (Result, io.Reader) {
-	br := bufio.NewReaderSize(r, sniffLen)
+	br := bufio.NewReaderSize(r, sniffBufSize)
 	prefix, _ := br.Peek(sniffLen) // best-effort: short reads/EOF are fine
 
 	bom := detectBOM(prefix)

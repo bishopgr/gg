@@ -235,9 +235,18 @@ for the full rationale.
   `NoTerminator`) — no terminator is ever silently assumed.
 - **No maximum line length**, unlike `bufio.Scanner`'s default 64KiB
   token cap — verified with a test line >5x the internal buffer size.
-  Deliberate tradeoff: correctness/simplicity (byte-by-byte scanning)
-  over throughput for now, called out in the package doc as the
-  specific thing to revisit in the PROCESS.md §4 step-8 performance pass.
+- **Performance pass done** (PROCESS.md §4 step 8): rewritten from an
+  initial byte-by-byte `bufio.Reader.ReadByte` scan (correctness-first,
+  deliberately simple) to bulk-scanning whatever's already buffered via
+  `bytes.IndexByte`, returning a slice that aliases bufio's own buffer
+  directly (zero-copy) whenever a line fits in one buffered chunk.
+  Measured ~211 MB/s → ~3.6 GB/s on LF input, ~227 MB/s → ~3.35 GB/s on
+  CRLF (`internal/lineio/bench_test.go`). A real quadratic-blowup bug
+  (an intermediate version re-scanned an entire buffered chunk per line
+  when one terminator byte never appeared) was caught by benchmarking
+  before shipping — see PROCESS.md §4 step 8 for the full story,
+  including the accepted, still-slower-but-no-longer-quadratic
+  bare-CR-only tradeoff (`BenchmarkReadLine_BareCR`).
 - **`Reset(io.Reader)`** lets one `Reader` (and its internal buffers) be
   reused across many files — set up now so the future `walker`-driven
   multi-file loop doesn't allocate a fresh reader per file.
@@ -282,6 +291,15 @@ for the full rationale.
 - Proven to compose with `lineio` as intended
   (`TestSniffThenLineio`): a UTF-16LE file with CRLF line endings splits
   into the same lines a plain UTF-8/LF file would.
+- **No accidental double-buffering with `lineio`** (PROCESS.md §4 step
+  8): `Sniff`'s internal buffer is sized to match
+  `lineio.DefaultBufSize` (64 KiB) — larger than the 8000-byte
+  `sniffLen` it actually peeks — specifically so `lineio.NewReader`
+  recognizes and reuses it directly instead of wrapping it in a second
+  buffer, which previously capped every downstream read at whatever the
+  smaller inner buffer returned per call. Verified at the real
+  composition point, not just inferred from throughput numbers
+  (`TestSniffThenLineio_NoDoubleBuffering`).
 - Fuzzed (`FuzzSniff`, ~2.2M executions): for the non-UTF-16 path,
   asserts byte-exact reconstruction after BOM-stripping; for the UTF-16
   path, asserts only "never panics, decode errors are the worst case"
@@ -474,6 +492,14 @@ go test ./...
   truly don't trigger Cobra's help/version machinery, that recursive
   search really does emit backslash-separated paths on Windows, and
   that real stdout output never contains a stray `\r` byte.
+- **Benchmarks** (PROCESS.md §4 step 8): `go test -bench . -benchmem
+  ./internal/lineio/... ./internal/matcher/... ./internal/grep/...`
+  covers the line-splitting hot path (LF/CRLF/bare-CR, plus the
+  `Reset`-and-reuse shape a multi-file walk actually uses), both
+  matcher implementations' match/no-match cases, and an end-to-end
+  `source → encoding.Sniff → lineio → matcher → output` run against a
+  generated 100,000-line fixture — kept as permanent regression guards
+  next to the code they measure, not one-off scratch scripts.
 - `go test -race` currently fails **locally** on this machine with
   `0xc0000139` — that's an incompatible `gcc` (Strawberry Perl's, found
   first on `PATH`) rather than a code issue; GitHub Actions'
@@ -520,5 +546,7 @@ Everything below is a genuine, deliberate gap — not a hidden one.
 ## SEE ALSO
 
 - [PROCESS.md](PROCESS.md) — full design and build plan this project follows
+- [BENCHMARK.md](BENCHMARK.md) — before/after measurements for the
+  PROCESS.md §4 step 8 performance pass
 - `grep(1)`, `regexp/syntax` (Go's RE2 syntax reference:
   <https://github.com/google/re2/wiki/Syntax>)

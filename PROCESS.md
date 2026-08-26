@@ -343,10 +343,126 @@ Status legend: ✅ done · 🚧 partially done · ⬜ not started.
    redirected-to-file/pipe (correctly off); **real-console verification
    (Windows Terminal vs. legacy conhost) is still an open manual-testing
    item** — see README LIMITATIONS, same caveat as §3.3.
-8. ⬜ **Performance pass**: buffered I/O sizing, avoid per-line allocations
+8. ✅ **Performance pass**: buffered I/O sizing, avoid per-line allocations
    in the hot path (reuse scanner buffers), add `go test -bench` targets
    over a generated large fixture; profile with `pprof` before optimizing
-   blindly. Not started — correctness came first, deliberately.
+   blindly. Benchmarks live alongside the packages they measure
+   (`internal/lineio/bench_test.go`, `internal/matcher/bench_test.go`,
+   `internal/grep/bench_test.go`) so they keep running as regression
+   guards, not one-off scratch scripts. See
+   [BENCHMARK.md](BENCHMARK.md) for a full before/after comparison
+   against the pre-performance-pass branch (`benchstat`-backed, not
+   eyeballed), including the two rejected intermediate designs.
+   - **`internal/lineio.Reader.ReadLine` — the actual hot path, found by
+     profiling, not guessed.** The original implementation scanned
+     byte-by-byte via `bufio.Reader.ReadByte` into a `bytes.Buffer`
+     (explicitly flagged as the thing to revisit, back when it was
+     written — see the git history of `internal/lineio`'s package doc).
+     `go tool pprof` on `BenchmarkReadLine_LF` confirmed it: `ReadByte`
+     plus the matching byte-by-byte `bytes.Buffer.WriteByte`
+     accumulation accounted for ~65% of `ReadLine`'s CPU time. Rewritten
+     to bulk-scan whatever's already sitting in bufio's internal buffer
+     — via `bytes.IndexByte`, one bounded pass per terminator instead of
+     a per-byte loop — and to return a slice aliasing that buffer
+     directly (zero-copy) whenever a line doesn't span more than one
+     buffered chunk, which is the overwhelming common case. Measured
+     effect (`go test -benchmem`, this machine, 50,000-line synthetic
+     fixture): **~211 MB/s → ~3.6 GB/s on LF input (~17×), ~227 MB/s →
+     ~3.35 GB/s on CRLF (~15×)**, with the `Reset`-and-reuse path
+     (`BenchmarkReadLine_Reuse`, the shape `internal/grep` actually
+     uses across a multi-file walk) down to a single small allocation
+     per `b.N` iteration — effectively zero per-line allocation in
+     steady state.
+   - **A real correctness-of-performance bug was found and fixed
+     mid-optimization, not just the headline win**: an intermediate
+     version used two independent, unbounded `bytes.IndexByte` scans
+     (one for `'\r'`, one for `'\n'`) and picked whichever came first.
+     This is *actively worse* than the original byte-by-byte code for
+     pure-LF input specifically — `IndexByte` searching for a `'\r'`
+     that never appears anywhere in a stream can't stop early, so it
+     re-scans the entire remaining buffered chunk (tens of KB) on
+     *every single line*, which is quadratic in the number of lines per
+     buffer-full. Caught by benchmarking before shipping it, not by
+     inspection — `BenchmarkReadLine_LF` regressed to ~105 MB/s, *worse*
+     than the byte-by-byte baseline. Fixed by finding `'\n'` first (the
+     common terminator, so normally a short scan) and bounding the
+     `'\r'` search to only the region before it — but that swap
+     reintroduced the identical failure mode in the opposite direction
+     for bare-CR-only content (classic Mac OS9 files with no `'\n'`
+     anywhere at all), so the scan window is additionally capped to a
+     fixed 4 KiB (`scanWindow` in `internal/lineio/reader.go`) regardless
+     of which terminator, if either, is actually present. Both failure
+     modes now have permanent regression benchmarks
+     (`BenchmarkReadLine_LF` and the dedicated `BenchmarkReadLine_BareCR`
+     added specifically to pin this down), not just the fixed-and-moved-on
+     code. **Accepted, documented tradeoff**: bare-CR-only input still
+     benchmarks slower than LF/CRLF (~820 MB/s vs. ~3.3–3.6 GB/s) — two
+     bounded `IndexByte` scans per 4 KiB window instead of one, since
+     `'\n'` genuinely never being found means the `'\r'` search can't be
+     narrowed by it. Not fixed further: bare CR is already the
+     documented rare/legacy case elsewhere in this file (§3.1), and
+     correctness (all existing table/fixture/fuzz tests, including
+     `cr.txt`) is unaffected either way.
+   - **Eliminated accidental double-buffering** between
+     `internal/encoding.Sniff` and `internal/lineio.NewReader`: `Sniff`
+     previously returned a `*bufio.Reader` sized only for its own
+     8000-byte sniff peek, which `lineio.NewReader` then wrapped in a
+     *second*, independent 64 KiB `bufio.Reader` — capping every
+     downstream fill at whatever the inner 8000-byte buffer's `Read`
+     returned per call instead of one larger read. Fixed on both ends:
+     `encoding.Sniff`'s buffer capacity is now sized to match
+     `lineio.DefaultBufSize` (64 KiB) — `sniffLen` itself, the amount
+     actually peeked for BOM/binary detection, is unchanged — and
+     `lineio.NewReader` recognizes an already-adequately-buffered
+     `*bufio.Reader` input and reuses it directly instead of wrapping it
+     again. Both sides are regression-tested directly, not just
+     inferred from throughput numbers:
+     `TestNewReader_ReusesAlreadyBufferedReader` /
+     `TestNewReader_WrapsUndersizedBufferedReader` in `internal/lineio`,
+     and `TestSniffThenLineio_NoDoubleBuffering` in `internal/encoding`
+     (the actual real composition point) confirm reuse by comparing
+     `Buffered()` counts, not just checking the code compiles.
+   - **`internal/matcher` was already close to optimal** — profiled, not
+     assumed. Both `fixedMatcher.Find` and `regexMatcher.Find` allocate
+     **zero** bytes on the no-match case (`BenchmarkFixedMatcher_Find_NoMatch`,
+     `BenchmarkRegexMatcher_Find_NoMatch`), which matters because most
+     lines in a real search don't match — that's the actual hot path,
+     not the match case. The match case's small allocations (one
+     `[]MatchRange` per matching line, ~16–270 B depending on engine)
+     are unavoidable output data, not waste, and weren't touched.
+   - **End-to-end benchmarks** (`internal/grep/bench_test.go`) exercise
+     the full `source → encoding.Sniff → lineio → matcher → output`
+     pipeline against a generated 100,000-line synthetic log fixture:
+     `BenchmarkRun_Regex_SparseMatches` (~520 MB/s), `BenchmarkRun_
+     Fixed_SparseMatches` (~930 MB/s), and `BenchmarkRun_Quiet_
+     FirstLineMatches` (effectively O(1) in file size via the existing
+     `-q` early-exit — not a new optimization, but now a permanent
+     benchmark proving that early exit stays cheap rather than
+     silently regressing). `pprof` on the regex benchmark shows the
+     remaining time split between real disk I/O (`ReadFile` via
+     `internal/source`) and Go's own `regexp` engine (`allMatches`/
+     `backtrack`, ~57% cumulative) — neither is this project's code to
+     optimize further without replacing the RE2 engine, which is out of
+     scope.
+   - **Discovered, fixed, and unrelated to the performance work itself**:
+     verifying `internal/lineio`'s existing CRLF/LF fixture-comparison
+     test on this machine surfaced that `core.autocrlf=true` (a common
+     Windows Git default) was silently rewriting `test/testdata/lf.txt`'s
+     `LF` bytes to `CRLF` on checkout, and — worse — that `crlf.txt`'s
+     *actual git blob* had lost its `CRLF` bytes entirely at some
+     previous commit (autocrlf normalizes to `LF` for storage on
+     commit too), meaning `crlf.txt` only ever "worked" by accident, by
+     being re-mangled back to `CRLF` on checkout on machines with the
+     same setting — and would silently degrade to plain `LF` content,
+     defeating the fixture's entire purpose, on any checkout with
+     `autocrlf=false`/`input` (the git/CI default on Linux and macOS
+     runners, PROCESS.md §6). Fixed with `test/testdata/.gitattributes`
+     (`* -text`, disabling any of git's line-ending normalization for
+     that directory regardless of a contributor's global config) and by
+     restoring `crlf.txt`'s actual `CRLF` bytes in the working tree and
+     re-committing them under the new attribute. Flagged here rather
+     than folded silently into the performance-pass diff, per this
+     document's own rule about not hiding what was found.
 9. ⬜ **Cross-platform pass**: run the full suite on Linux/macOS (CI matrix,
    §6), fix anything Windows-specific that leaked into shared code paths
    (e.g., accidental `\r\n` assumptions). Not started; this repo has no
@@ -424,3 +540,6 @@ Fill in as choices are made; each row should reference the section above.
 | Ctrl+C / graceful shutdown | **Decided:** `signal.NotifyContext(context.Background(), os.Interrupt)` in `main.go`, threaded via Cobra's `ExecuteContext`/`cmd.Context()` into `grep.Run(ctx, opts)`. Wired ahead of there being real work to cancel, specifically to avoid a breaking signature change later. `cmd/gg/main.go`, `internal/grep.Run` | §3.5 |
 | Windows file-sharing semantics | **Decided (and a real bug found+fixed):** plain `os.Open` on Windows omits `FILE_SHARE_DELETE` (confirmed against Go 1.26's own source and empirically), breaking concurrent rename/delete — e.g. log rotation — while gg holds a file open. `internal/source.Open` opens via `x/sys/windows.CreateFile` with `FILE_SHARE_DELETE` added on Windows. `internal/source` | §3.6 |
 | Reserved device names (`NUL`, `CON`, ...) | **Decided:** no special-casing — verified `os.Stat`/`os.Open` on `NUL` already behave harmlessly (empty read, no error), matching Unix `/dev/null` semantics. `CON`/`PRN`/`COMn` reasoned-but-not-live-tested (opening `CON` risks blocking on keyboard input with no console attached). | §3.6 |
+| `lineio.ReadLine` scanning strategy | **Decided, and measured, not guessed:** bulk `bytes.IndexByte` scan of whatever's already buffered (with a fixed 4 KiB `scanWindow` cap to keep the cost bounded regardless of which terminator byte, if any, is actually present), zero-copy alias of bufio's own buffer for the single-chunk common case. ~15–17× throughput over the original byte-by-byte scan; two intermediate designs were tried and rejected specifically because benchmarking (not inspection) caught them regressing pure-LF or pure-bare-CR input to quadratic behavior. `internal/lineio.Reader.ReadLine` | §4 step 8 |
+| `Sniff`/`lineio` buffer sizing | **Decided:** `encoding.Sniff`'s buffer capacity matches `lineio.DefaultBufSize` (64 KiB) so `lineio.NewReader` can detect and reuse it directly instead of double-buffering; `sniffLen` (the 8000-byte peek used for BOM/binary detection) is unchanged. `internal/encoding.Sniff`, `internal/lineio.NewReader` | §4 step 8 |
+| `test/testdata` line-ending fixtures | **Bug found and fixed, not just a decision:** `core.autocrlf=true` (common on Windows) was silently rewriting `lf.txt` on checkout, and `crlf.txt`'s committed blob had already lost its actual `CRLF` bytes to the same setting at some prior commit — meaning `crlf.txt` only "worked" by accident on machines that happened to share that setting, and would silently degrade to plain `LF` on any checkout without it (e.g. the Linux/macOS CI runners in §6). Fixed with `test/testdata/.gitattributes` (`* -text`) plus restoring `crlf.txt`'s real bytes. | §3.1, §4 step 8 |

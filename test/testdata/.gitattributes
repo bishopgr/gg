@@ -1,0 +1,11 @@
+# These fixtures are byte-exact test data — their line-ending bytes are
+# the entire point of internal/lineio's tests (PROCESS.md §3.1: crlf.txt
+# and lf.txt must differ *only* in terminator bytes, byte-for-byte).
+# Without this, a contributor checking out on Windows with the common
+# core.autocrlf=true default silently gets lf.txt's LF bytes rewritten
+# to CRLF on checkout, breaking that exact comparison — discovered while
+# verifying the PROCESS.md §4 step 8 performance pass, not a
+# hypothetical. `-text` disables any of git's own line-ending
+# normalization for every file in this directory, regardless of the
+# checking-out user's global config.
+* -text
