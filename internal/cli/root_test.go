@@ -103,6 +103,156 @@ func TestExecute_ThreadsContextToRunGrep(t *testing.T) {
 	}
 }
 
+// TestExecute_ShortHMeansNoFilenameNotHelp is the concrete proof of the
+// registerFlags workaround documented in root.go: -h must reach RunE as
+// --no-filename, not trigger Cobra's help output.
+func TestExecute_ShortHMeansNoFilenameNotHelp(t *testing.T) {
+	var gotOpts grep.Options
+	ran := false
+	withFakeRunGrep(t, func(ctx context.Context, opts grep.Options) (int, error) {
+		ran = true
+		gotOpts = opts
+		return grep.ExitMatch, nil
+	})
+
+	Execute(context.Background(), []string{"-h", "pattern", "file.txt"})
+
+	if !ran {
+		t.Fatal("runGrep was never called — -h triggered help instead of being parsed as --no-filename")
+	}
+	if !gotOpts.NoFilename {
+		t.Error("Options.NoFilename = false, want true from -h")
+	}
+}
+
+// TestExecute_ShortVMeansInvertMatchNotVersion is the equivalent proof
+// for -v: it must reach RunE as --invert-match, not print the version.
+func TestExecute_ShortVMeansInvertMatchNotVersion(t *testing.T) {
+	var gotOpts grep.Options
+	ran := false
+	withFakeRunGrep(t, func(ctx context.Context, opts grep.Options) (int, error) {
+		ran = true
+		gotOpts = opts
+		return grep.ExitMatch, nil
+	})
+
+	Execute(context.Background(), []string{"-v", "pattern", "file.txt"})
+
+	if !ran {
+		t.Fatal("runGrep was never called — -v triggered version instead of being parsed as --invert-match")
+	}
+	if !gotOpts.InvertMatch {
+		t.Error("Options.InvertMatch = false, want true from -v")
+	}
+}
+
+func TestExecute_ColorFlagParsing(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		want grep.ColorMode
+	}{
+		{"default (flag absent)", []string{"pattern", "f"}, grep.ColorAuto},
+		{"explicit auto", []string{"--color=auto", "pattern", "f"}, grep.ColorAuto},
+		{"bare --color means always", []string{"--color", "pattern", "f"}, grep.ColorAlways},
+		{"explicit always", []string{"--color=always", "pattern", "f"}, grep.ColorAlways},
+		{"explicit never", []string{"--color=never", "pattern", "f"}, grep.ColorNever},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var gotOpts grep.Options
+			withFakeRunGrep(t, func(ctx context.Context, opts grep.Options) (int, error) {
+				gotOpts = opts
+				return grep.ExitMatch, nil
+			})
+
+			code := Execute(context.Background(), tt.args)
+			if code != grep.ExitMatch {
+				t.Fatalf("Execute(%v) = %d, want ExitMatch (args should have parsed cleanly)", tt.args, code)
+			}
+			if gotOpts.Color != tt.want {
+				t.Errorf("Options.Color = %v, want %v", gotOpts.Color, tt.want)
+			}
+		})
+	}
+}
+
+func TestExecute_FilesWithMatchesAndWithoutMatchAreMutuallyExclusive(t *testing.T) {
+	code := Execute(context.Background(), []string{"-l", "-L", "pattern", "file.txt"})
+	if code != grep.ExitError {
+		t.Errorf("Execute(-l -L) = %d, want ExitError (mutually exclusive flags)", code)
+	}
+}
+
+func TestExecute_NoFilenameAndWithFilenameAreMutuallyExclusive(t *testing.T) {
+	code := Execute(context.Background(), []string{"-h", "-H", "pattern", "file.txt"})
+	if code != grep.ExitError {
+		t.Errorf("Execute(-h -H) = %d, want ExitError (mutually exclusive flags)", code)
+	}
+}
+
+// TestExecute_FlagsReachOptions is a broader sanity check that the bulk
+// boolean/slice flags all actually reach grep.Options — narrower than
+// the dedicated tests above, but cheap insurance against a copy-paste
+// mistake in the flags->Options translation for the flags that don't
+// have their own dedicated test.
+func TestExecute_FlagsReachOptions(t *testing.T) {
+	var gotOpts grep.Options
+	withFakeRunGrep(t, func(ctx context.Context, opts grep.Options) (int, error) {
+		gotOpts = opts
+		return grep.ExitMatch, nil
+	})
+
+	Execute(context.Background(), []string{
+		"-i", "-F", "-w", "-x", "-n", "-o", "-c",
+		"-r", "--include=*.go", "--exclude=*_test.go", "--exclude-dir=vendor",
+		"pattern", "file.txt",
+	})
+
+	switch {
+	case !gotOpts.IgnoreCase:
+		t.Error("IgnoreCase not set")
+	case !gotOpts.Fixed:
+		t.Error("Fixed not set")
+	case !gotOpts.WordRegexp:
+		t.Error("WordRegexp not set")
+	case !gotOpts.LineRegexp:
+		t.Error("LineRegexp not set")
+	case !gotOpts.LineNumber:
+		t.Error("LineNumber not set")
+	case !gotOpts.OnlyMatching:
+		t.Error("OnlyMatching not set")
+	case !gotOpts.Count:
+		t.Error("Count not set")
+	case !gotOpts.Recursive:
+		t.Error("Recursive not set")
+	case len(gotOpts.Include) != 1 || gotOpts.Include[0] != "*.go":
+		t.Errorf("Include = %v, want [*.go]", gotOpts.Include)
+	case len(gotOpts.Exclude) != 1 || gotOpts.Exclude[0] != "*_test.go":
+		t.Errorf("Exclude = %v, want [*_test.go]", gotOpts.Exclude)
+	case len(gotOpts.ExcludeDir) != 1 || gotOpts.ExcludeDir[0] != "vendor":
+		t.Errorf("ExcludeDir = %v, want [vendor]", gotOpts.ExcludeDir)
+	}
+}
+
+func TestExecute_DereferenceRecursiveImpliesRecursiveAndFollowSymlinks(t *testing.T) {
+	var gotOpts grep.Options
+	withFakeRunGrep(t, func(ctx context.Context, opts grep.Options) (int, error) {
+		gotOpts = opts
+		return grep.ExitMatch, nil
+	})
+
+	Execute(context.Background(), []string{"-R", "pattern", "dir"})
+
+	if !gotOpts.Recursive {
+		t.Error("Recursive = false, want true from -R")
+	}
+	if !gotOpts.FollowSymlinks {
+		t.Error("FollowSymlinks = false, want true from -R")
+	}
+}
+
 func TestExecute_CancelledContextIsObservedByRunGrep(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()

@@ -1,9 +1,9 @@
-# gg(1) — cross-platform grep, work in progress
+# gg(1) — cross-platform grep
 
-> Status snapshot as of the current build. This README is written in a
-> man-page shape but doubles as a **progress report**: every section below
-> states plainly what is implemented, tested, and wired up versus what is
-> still a stub. For the full design/build plan see [PROCESS.md](PROCESS.md).
+> This README is written in a man-page shape but doubles as a
+> **progress report**: every section states plainly what is
+> implemented and tested versus what's still planned. For the full
+> design/build plan see [PROCESS.md](PROCESS.md).
 
 ## NAME
 
@@ -12,19 +12,36 @@
 ## SYNOPSIS
 
 ```
-gg PATTERN [FILE...]
+gg [OPTION]... PATTERN [FILE...]
 gg --version
 gg --help
 ```
 
+**`gg` is now a working, usable grep implementation** — matching,
+multi-file/stdin/recursive search, `--include`/`--exclude`, output
+shaping (`-n -c -o -l -L -q -v`), and color are all wired end-to-end.
+See [OPTIONS](#options) for exactly what's implemented vs. still
+planned, and [LIMITATIONS](#limitations-current-expected-to-shrink) for
+explicit, honest gaps (context lines, `-e`/`-f`, PCRE, etc.).
+
 ## DESCRIPTION
 
-`gg` searches `FILE`(s) for lines matching `PATTERN` and prints them. When
-no `FILE` is given, or `FILE` is `-`, `gg` reads standard input.
+`gg` searches `FILE`(s) for lines matching `PATTERN` and prints them.
+When no `FILE` is given, or `FILE` is `-`, `gg` reads standard input.
 
-**This is currently true only as a statement of intent.** The command
-line and matching engine are built and unit-tested independently, but
-they are not yet wired together — see [STATUS](#status) below.
+Examples:
+
+```powershell
+gg error app.log                    # search one file
+gg -i "warn|error" app.log           # case-insensitive, alternation
+gg -rn TODO .\src                    # recursive, with line numbers
+gg -rl "TODO" .\src                  # just the filenames that contain it
+gg -c error app.log                  # just a count
+gg -v skip app.log                   # invert: lines NOT matching
+gg -o "\d+" app.log                  # only the matched substrings
+Get-Content app.log | gg error       # read from stdin
+gg --include=*.go -r TODO .          # only search .go files
+```
 
 ## STATUS
 
@@ -33,89 +50,166 @@ Legend: ✅ done + tested · 🚧 built, not wired in · ⬜ not started
 | Area | State | Notes |
 |---|---|---|
 | CLI scaffold (Cobra root command, `--version`, `--help`, usage errors) | ✅ | `internal/cli` |
-| Exit code contract (`0`/`1`/`2`) | ✅ | Now permanently regression-tested (was manual-only since scaffolding) via a swappable `runGrep` seam in `internal/cli` |
-| Ctrl+C / graceful shutdown context threading | ✅ | `signal.NotifyContext` in `main.go` → Cobra `ExecuteContext` → `grep.Run(ctx, opts)`; `Run` checks `ctx.Err()` eagerly. Nothing to gracefully flush yet — no output layer |
-| File opening (Windows-appropriate sharing semantics, "-" for stdin) | ✅ | `internal/source` — fixes a real gap: plain `os.Open` on Windows blocks concurrent rename/delete (e.g. log rotation); fixed via `FILE_SHARE_DELETE`, **not yet reachable from the CLI** |
-| Build-time version metadata (`-ldflags`) | ✅ | `internal/buildinfo` + `scripts/build.ps1`, falls back to `dev`/`none` without git |
-| Matching engine (`Matcher` interface, fixed-string + regex impls) | ✅ | `internal/matcher` — table + fuzz tested, **not yet reachable from the CLI** |
-| CLI flags for matching (`-i -v -F -w -x -e -f ...`) | 🚧 | `matcher.Options` supports `-i`/`-F`/`-w`/`-x` already; no Cobra flags expose them yet |
-| Actual search execution (`gg PATTERN FILE` producing output) | ⬜ | `grep.Run` is a stub that always returns `(ExitError, "not yet implemented")` |
-| Line-splitting reader (CRLF/LF/CR, no-trailing-newline) | ✅ | `internal/lineio` — table + fuzz tested, **not yet reachable from the CLI** |
-| Encoding/BOM detection, UTF-16 transcode, binary sniff | ✅ | `internal/encoding` — table + fuzz tested, **detection only, no skip/`--text` policy yet, not wired into the CLI** |
-| Recursive directory walk, glob expansion, `--include`/`--exclude`/`--exclude-dir` | ✅ | `internal/walker` — table + fuzz tested, **not yet reachable from the CLI** |
-| Terminal detection, Windows ANSI enabling | ✅ | `internal/termenv` — tested for non-terminal cases; real-console behavior needs manual verification (see LIMITATIONS) |
-| Output formatting (filename prefix, line numbers, context, color) | ⬜ | `internal/output` |
-
-Running `gg` today will parse arguments and print usage/version correctly,
-but any actual search (`gg foo somefile.txt`) currently fails with:
-
-```
-gg: gg: search engine not yet implemented
-```
-
-exit code `2`. This is expected and intentional at this stage — see
-[PROCESS.md §4](PROCESS.md#4-build-order-do-these-in-sequence-committest-at-each-step)
-for the build order this project is following.
+| **End-to-end search execution** (`gg PATTERN FILE` producing real output) | ✅ | `grep.Run` — see OPTIONS below for exact flag coverage |
+| Exit code contract (`0`/`1`/`2`) | ✅ | Permanently regression-tested via a swappable `runGrep` seam in `internal/cli`, plus real-process e2e tests in `test/e2e` |
+| Ctrl+C / graceful shutdown context threading | ✅ | `signal.NotifyContext` in `main.go` → Cobra `ExecuteContext` → `grep.Run(ctx, opts)`; checked eagerly and per-line |
+| File opening (Windows-appropriate sharing semantics, "-" for stdin) | ✅ | `internal/source`, wired into `grep.Run` |
+| Build-time version metadata (`-ldflags`) | ✅ | `internal/buildinfo` + `scripts/build.ps1` |
+| Matching engine (regex + fixed-string, `-i`/`-F`/`-w`/`-x`/`-v`) | ✅ | `internal/matcher`, wired into `grep.Run` |
+| Line-splitting (CRLF/LF/CR, no-trailing-newline) | ✅ | `internal/lineio`, wired into `grep.Run` |
+| Encoding/BOM detection, UTF-16 transcode, binary-match message | ✅ | `internal/encoding`, wired into `grep.Run`; no `-a`/`--text`/`-I` flag yet (see LIMITATIONS) |
+| Recursive directory walk, glob expansion, `--include`/`--exclude`/`--exclude-dir` | ✅ | `internal/walker`, wired into `grep.Run` |
+| Terminal detection, Windows ANSI enabling, `--color` | ✅ | `internal/termenv` + `grep.resolveColor`, wired into `grep.Run` |
+| Output formatting (filename prefix, line numbers, `-o`, `-c`, `-l`/`-L`, color) | ✅ | `internal/output`, wired into `grep.Run` |
+| Context lines (`-A`/`-B`/`-C`), multi-pattern (`-e`/`-f`), `-m`, `-z`, PCRE | ⬜ | Explicit non-goals for now — see LIMITATIONS |
+| Black-box e2e tests against the real compiled binary | ✅ | `test/e2e` |
 
 ## OPTIONS
 
-Only flags Cobra actually recognizes today are marked implemented; the
-rest describe what `matcher.Options` already supports internally and
-what `PROCESS.md` commits to for upcoming steps.
-
 | Flag | Meaning | State |
 |---|---|---|
-| `-h`, `--help` | show usage | ✅ implemented |
-| `-v`, `--version` | print version, commit, build date | ✅ implemented (note: `-v` will be reassigned to `--invert-match` once flags land, matching GNU grep; version will stay `--version`-only) |
-| `-i` | ignore case | 🚧 engine-ready (`matcher.Options.IgnoreCase`), no flag yet |
-| `-F` | fixed string (literal), not regex | 🚧 engine-ready (`matcher.Options.Fixed`), no flag yet |
-| `-w` | match whole words only | 🚧 engine-ready (`matcher.Options.WordRegexp`), no flag yet |
-| `-x` | match whole lines only | 🚧 engine-ready (`matcher.Options.LineRegexp`), no flag yet |
-| `-v` (invert) | select non-matching lines | ⬜ planned, engine-level (not a `matcher.Matcher` concern) |
-| `-n` | prefix output with line numbers | ⬜ planned |
-| `-c` | print only a count of matches | ⬜ planned |
-| `-l`, `-L` | print only file names with(out) matches | ⬜ planned |
-| `-q` | quiet, exit-status only | ⬜ planned |
-| `-r`, `-R` | recurse into directories | ⬜ planned |
-| `-o` | print only the matched part of the line | ⬜ planned |
+| `--help` | show usage (long-flag-only — see note below) | ✅ |
+| `--version` | print version, commit, build date (long-flag-only) | ✅ |
+| `-i`, `--ignore-case` | ignore case distinctions | ✅ |
+| `-F`, `--fixed-strings` | treat `PATTERN` as a literal string, not regex | ✅ |
+| `-v`, `--invert-match` | select non-matching lines | ✅ |
+| `-w`, `--word-regexp` | match only whole words | ✅ |
+| `-x`, `--line-regexp` | match only whole lines | ✅ |
+| `-n`, `--line-number` | prefix each printed line with its line number | ✅ |
+| `-o`, `--only-matching` | print only the matched part of each line | ✅ |
+| `-c`, `--count` | print only a per-file count of matching lines | ✅ |
+| `-l`, `--files-with-matches` | print only names of files with a match | ✅ |
+| `-L`, `--files-without-match` | print only names of files with no match | ✅ |
+| `-q`, `--quiet` | no output at all; exit status only (stops at first match) | ✅ |
+| `-h`, `--no-filename` | never print filenames | ✅ |
+| `-H`, `--with-filename` | always print filenames | ✅ |
+| `-r`, `--recursive` | recurse into directories (does not follow symlinks) | ✅ |
+| `-R`, `--dereference-recursive` | like `-r`, but follow all symlinks | ✅ |
+| `--include=GLOB` | only search files matching `GLOB` when recursing | ✅ |
+| `--exclude=GLOB` | skip files matching `GLOB` when recursing | ✅ |
+| `--exclude-dir=GLOB` | don't descend into directories matching `GLOB` | ✅ |
+| `--color[=auto\|always\|never]` | highlight matches; bare `--color` means `always` | ✅ |
 | `-A`, `-B`, `-C NUM` | print lines of context | ⬜ planned |
 | `-e PATTERN`, `-f FILE` | additional/file-sourced patterns | ⬜ planned |
-| `--color=auto\|always\|never` | highlight matches | ⬜ planned |
+| `-m NUM` | stop after `NUM` matches | ⬜ planned |
+| `-a`, `--text`, `-I` | force text mode / skip binary files entirely | ⬜ planned (binary files currently always print the `Binary file X matches` message, never raw lines, never skipped) |
+| `-z` | NUL-separated input/output | ⬜ planned |
+| `-P` (PCRE) | Perl-compatible regex | ⬜ non-goal — RE2 syntax only (PROCESS.md §1) |
 
-Full phased rollout: [PROCESS.md §1](PROCESS.md#1-decide-the-feature-surface-write-this-down-before-coding).
+**Why `--help`/`--version` are long-flag-only**: GNU grep has never used
+`-h` for help or `-v` for version — `-h` means `--no-filename` and `-v`
+means `--invert-match`. `gg` matches that convention rather than
+Cobra's defaults; see the doc comment on `registerFlags` in
+`internal/cli/root.go` for exactly how (it needed two different
+workarounds for two asymmetric Cobra behaviors, verified against
+Cobra's source, not assumed).
+
+Full phased rollout this table tracks:
+[PROCESS.md §1](PROCESS.md#1-decide-the-feature-surface-write-this-down-before-coding).
 
 ## EXIT STATUS
-
-Defined now in `internal/grep` and already exercised end-to-end through
-the CLI, ahead of the engine itself, so the contract is locked in before
-more code depends on it:
 
 | Code | Meaning |
 |---|---|
 | `0` | at least one match was found (also: `--version`/`--help` succeeded) |
 | `1` | ran successfully, found no matches |
-| `2` | usage error, invalid pattern, missing file, or (today) "not yet implemented" |
+| `2` | usage error, invalid pattern, or a per-file problem (missing file, permission denied, a directory given without `-r`) |
+
+Per-file problems (missing file, `Is a directory`, etc.) are reported
+directly to stderr as they're found, one line per problem, exactly like
+GNU grep — search continues with the remaining files, and the exit code
+still ends up `2`. A single whole-command-fatal error (e.g. an invalid
+regex pattern) is reported once, via the CLI's generic `gg: <err>`
+handler, instead — see the doc comment on `grep.Run` for the reasoning
+behind that split.
 
 ## ARCHITECTURE
 
 ```
 cmd/gg/main.go        entrypoint — only place that calls os.Exit          [done]
-internal/cli/         Cobra command tree, flag parsing only               [done: scaffold]
-internal/grep/         composition root: Run(opts) (exitCode int, err error) [stub]
+internal/cli/         Cobra command tree, flag parsing only               [done]
+internal/grep/         composition root: Run(ctx, opts) (exitCode int, err error) [done: MVP+]
 internal/matcher/      pattern matching: fixed-string + regex, no I/O     [done]
 internal/buildinfo/    Version/Commit/Date via -ldflags                   [done]
 internal/lineio/       CRLF/LF/CR line splitting, streaming, no length cap [done]
-internal/encoding/     BOM detect/strip, UTF-16->UTF-8 transcode, binary sniff [done: detection]
+internal/encoding/     BOM detect/strip, UTF-16->UTF-8 transcode, binary sniff [done]
 internal/walker/       file/dir traversal, glob expansion, include/exclude [done]
-internal/output/       printer: plain/color, context, filename prefixing [not started]
+internal/output/       printer: filename/line-number/-o/color formatting  [done]
 internal/termenv/      Windows console-mode / isatty handling            [done]
 internal/source/       open a file or stdin, Windows-safe sharing flags  [done]
+test/e2e/               black-box tests against the compiled binary       [done]
 ```
 
-`internal/grep` is the seam: `internal/cli` depends on it, it will depend
-on `matcher`/`lineio`/`walker`/`output`, and nothing above it leaks
-Cobra or terminal concerns downward. See PROCESS.md §2 for the full
-rationale.
+`internal/grep` is the seam: `internal/cli` depends on it, and it now
+depends on every other package listed above — `matcher`, `lineio`,
+`encoding`, `walker`, `source`, `output`, `termenv` — while nothing
+above it leaks Cobra or terminal concerns downward. See PROCESS.md §2
+for the full rationale.
+
+### `internal/grep` design (implemented) — the composition root
+
+- `Run(ctx, opts) (exitCode int, err error)` wires everything together
+  per file: `source.Open` → `encoding.Sniff` → `lineio.NewReader` →
+  `matcher.Find` per line → `output.Printer`. `walker.Walk` drives that
+  per-file loop for directory roots; a bare file or `"-"` (stdin) skips
+  straight to it.
+- **Two kinds of failure, deliberately distinguished** (see the `Run`
+  doc comment for the full reasoning): a single whole-command-fatal
+  error (bad pattern, cancelled context) is *returned*, for
+  `internal/cli`'s generic `gg: <err>` handler to print once; a
+  per-file problem hit while searching multiple files (missing file,
+  permission denied, a directory without `-r`) is written directly to
+  `opts.Stderr` as it's found and *never* returned, so it isn't also
+  wrapped in a redundant generic line — exactly how GNU grep prints one
+  diagnostic per bad file and keeps going. Either way, `hadError` forces
+  the final exit code to `ExitError`, even if other files matched.
+- **Mode precedence** (`-q` > `-l`/`-L` > `-c` > normal) is resolved
+  once via `selectMode`, not scattered `if` checks through the search
+  loop.
+- **`-q` actually stops searching**, not just suppresses output: the
+  moment quiet mode finds its first match, the walk aborts (via an
+  internal `errStop` sentinel) and no further files — including ones
+  that would have errored — are even opened. Regression-tested
+  (`TestRun_Quiet_StopsSearchingAfterFirstMatch`) by pairing a matching
+  file with a missing one and confirming the missing one is never
+  reached.
+- **Filename-prefix policy** matches GNU grep's actual convention, not
+  a simplified guess: shown when there's more than one root *or* when
+  recursing (a recursive search that happens to find exactly one file
+  still gets a prefix in real grep), overridable by `-H`/`-h`.
+- **Color policy resolution lives here, not in `internal/termenv`**:
+  `resolveColor` combines the `--color` value with
+  `termenv.IsTerminal`/`termenv.EnableANSI` on `opts.Stdout` — continuing
+  the "low-level packages report facts, the composition root decides
+  policy" rule every package here follows.
+- **Binary files** print GNU grep's conventional
+  `Binary file FILENAME matches` message instead of raw (likely
+  garbage) line content — there is no `-a`/`--text`/`-I` flag yet to
+  override this, which is an explicit, stated gap (see LIMITATIONS),
+  not a silent one.
+
+### `internal/output` design (implemented)
+
+- `Printer` is pure formatting policy: filename/line-number prefixing,
+  `-o`'s one-match-per-output-line behavior, ANSI highlighting, and the
+  `-c`/`-l`/`-L` message shapes — it never decides *whether* a line
+  matched or *whether* color should be used, matching every other
+  package's "report/apply facts, don't decide them" contract.
+  `internal/grep` is the only caller and the only place those policy
+  decisions get made.
+- Buffered (`bufio.Writer`) for performance, with an explicit `Flush`
+  the caller must call — `grep.Run` defers it once, right after
+  construction, so every return path (including `-q`'s early exit) is
+  covered.
+- Every printed line ends with a bare `'\n'`, unconditionally — the
+  PROCESS.md §3.1 decision, finally with code enforcing it. Verified at
+  the real-process level too (`TestE2E_OutputAlwaysEndsLinesWithBareLF`
+  greps gg's own output for a stray `\r`).
+- `-v`'s inverted matches carry no highlight ranges (there's nothing to
+  highlight in a line selected for *not* matching), and `-o` combined
+  with `-v` prints nothing for those lines — both match GNU grep's own
+  behavior for this combination and are explicitly tested, not just
+  incidentally correct.
 
 ### `internal/matcher` design (implemented)
 
@@ -350,11 +444,36 @@ go test ./...
   proving the still-open handle keeps reading after a concurrent
   delete), the `"-"` → stdin mapping, and (Windows-only) the `NUL`
   reserved-device-name case.
-- `internal/cli` and `internal/grep` have tests for the exit-code
-  contract (`--version`/`--help`/no-args, and — via a swappable
-  `runGrep` seam — all three of `ExitMatch`/`ExitNoMatch`/`ExitError`
-  from a fake engine), argument-to-`Options` wiring, and context
-  propagation/cancellation for the Ctrl+C plumbing.
+- `internal/output` has tests for every formatting combination
+  (filename/line-number prefixes, color on/off, `-o`'s one-match-per-line
+  behavior including with color and with filename/line-number, `-v`'s
+  no-ranges-to-highlight case, `-c`/`-l`/`-L`/binary-match message
+  shapes) and confirms buffering requires an explicit `Flush`.
+- `internal/grep` has ~40 tests covering the actual end-to-end wiring
+  against real temp files: basic match/no-match, every matching flag
+  (`-i`/`-F`/`-w`/`-x`/`-v`), every output-shape flag (`-n`/`-o`/`-c`/
+  `-l`/`-L`/`-q` including the quiet-mode early-stop-before-reaching-a-
+  broken-file case), filename-prefix policy (`-H`/`-h`/single-vs-multi-file),
+  recursive search with `--include`/`--exclude`, glob expansion, stdin
+  (both as the default and as an explicit `"-"` mixed with real files),
+  `--color` resolution against both a forced and a non-file writer, and
+  the binary-file-match-message path — plus the fatal-vs-per-file error
+  split (`internal/grep`'s central design decision) and context
+  cancellation.
+- `internal/cli` has tests for the exit-code contract (`--version`/
+  `--help`/no-args, and — via a swappable `runGrep` seam — all three of
+  `ExitMatch`/`ExitNoMatch`/`ExitError` from a fake engine),
+  argument-to-`Options` wiring for every flag, the `-h`/`-v` shorthand
+  reassignment (proven by checking the fake engine actually gets called
+  instead of Cobra short-circuiting into help/version), `--color`'s
+  GNU-style optional-value parsing (bare/`=always`/`=never`/`=auto`),
+  and the `-l`/`-L` and `-h`/`-H` mutual-exclusion checks.
+- `test/e2e` builds the real `gg` binary once (`TestMain`) and drives it
+  as a subprocess for the scenarios only a real process boundary can
+  validate: actual exit codes, actual stdio redirection, that `-h`/`-v`
+  truly don't trigger Cobra's help/version machinery, that recursive
+  search really does emit backslash-separated paths on Windows, and
+  that real stdout output never contains a stray `\r` byte.
 - `go test -race` currently fails **locally** on this machine with
   `0xc0000139` — that's an incompatible `gcc` (Strawberry Perl's, found
   first on `PATH`) rather than a code issue; GitHub Actions'
@@ -363,40 +482,40 @@ go test ./...
 
 ## LIMITATIONS (current, expected to shrink)
 
-- Does not yet search anything — `gg PATTERN FILE` exits `2`.
-- `internal/walker`, `internal/termenv`, and `internal/source` exist and
-  are tested, but nothing calls them yet — no `-r`/`-R`/`--include`/
-  `--exclude`/`--color` flags exist on the CLI, glob expansion isn't
-  applied to CLI arguments yet, and `grep.Run` doesn't open any files.
-- Graceful shutdown on Ctrl+C is wired at the plumbing level
-  (`context.Context` flows from `main.go` all the way to `grep.Run`,
-  which checks `ctx.Err()`), but there's no actual long-running work or
-  buffered output yet for cancellation to meaningfully interrupt —
-  the real test of this is deferred until the output layer exists.
-- No color output (no output layer yet at all — see above).
-- No PCRE (backreferences/lookaround); RE2 syntax only.
-- Encoding/BOM/binary *detection* exists (`internal/encoding.Sniff`) but
-  isn't wired to anything yet — no code calls it before opening a file.
-  There is also no *policy* built on top of it yet: nothing skips binary
-  files or prints `Binary file X matches`, and there's no `-a`/`--text`/
-  `-I` flag to control that once it exists.
-- No-BOM UTF-16 is undetectable by design (no reliable signature) and
-  will be read as (mostly) NUL-heavy garbage text — an accepted,
-  documented gap, not a bug to chase.
-- Output line-ending is **decided but not yet enforced**: gg will always
-  write a bare `\n` after every printed line, regardless of the source
-  file's terminator or platform (PROCESS.md §3.1) — but there is no
-  output layer yet to actually do that. `internal/lineio.Terminator`
-  records the source fact only and explicitly does not drive this.
-- `internal/termenv`'s behavior against a genuine interactive console
-  (legacy conhost vs. Windows Terminal/ConPTY) has not been verified —
-  only "is this a regular file/pipe" (correctly `false`) is covered by
-  automated tests. Needs manual verification in both console types.
-- `internal/walker`'s symlink-following logic has not been specifically
-  tested against a Windows directory junction (a different underlying
-  mechanism from `os.Symlink`-created symlinks) — believed to behave
-  the same way based on how modern Go's `os` package reports reparse
-  points, but not proven with a test here.
+Everything below is a genuine, deliberate gap — not a hidden one.
+
+- **No context lines** (`-A`/`-B`/`-C`) — needs a ring buffer of prior
+  lines plus a post-match countdown; explicitly deferred rather than
+  half-implemented.
+- **No `-e PATTERN` / `-f FILE`** (multiple/file-sourced patterns) — the
+  engine takes exactly one `Pattern` string today.
+- **No `-m NUM`** (stop after N matches per file) or **`-z`**
+  (NUL-separated records).
+- **No PCRE** (`-P`): Go's `regexp` is RE2 — no backreferences, no
+  lookaround. Stated non-goal for v1 (PROCESS.md §1), not an oversight.
+- **Binary files always print the `Binary file X matches` message**,
+  never raw line content, with no way to override it yet — there's no
+  `-a`/`--text`/`-I` flag. This is a real, if narrow, behavior gap: you
+  cannot currently force gg to search a binary file as text.
+- **No-BOM UTF-16 is undetectable by design** (no reliable signature)
+  and reads as mostly NUL-heavy garbage text — an accepted, documented
+  gap (PROCESS.md §3.2), not a bug to chase.
+- **`--color`'s `auto` mode has an untested real-console path**:
+  automated tests can only prove the "definitely not a terminal"
+  branch (regular files, pipes, the buffers integration tests use).
+  Whether `EnableANSI` actually renders correctly on both legacy
+  conhost and Windows Terminal/ConPTY has not been manually verified —
+  tracked as an open item, not assumed fine because the code compiles.
+- **Windows directory junctions**: `internal/walker`'s symlink-following
+  logic is believed, but not proven with a test, to treat junctions the
+  same as `os.Symlink`-created symlinks (creating a junction needs
+  `mklink /J` or raw syscalls, not `os.Symlink`).
+- **No de-duplication of file arguments** — passing the same file twice
+  searches it twice. Deferred until something actually needs it.
+- **Filename-argument globbing only covers `internal/walker.ExpandGlobs`'s
+  `filepath.Glob` syntax** — no `**` (recursive glob) support via
+  something like `doublestar`. Use `-r`/`--include` instead for
+  recursive filtering.
 
 ## SEE ALSO
 

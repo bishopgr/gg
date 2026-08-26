@@ -20,19 +20,15 @@ func TestRun_CancelledContextReturnsErrorImmediately(t *testing.T) {
 	}
 }
 
-func TestRun_ValidContextReachesStub(t *testing.T) {
+func TestRun_ValidContextProceedsPastTheCheck(t *testing.T) {
 	// With a live (non-cancelled) context, Run should get past the
-	// context check and hit the not-yet-implemented stub — pinning down
-	// that the ctx.Err() check doesn't accidentally short-circuit every
-	// call, only genuinely cancelled ones.
-	code, err := Run(context.Background(), Options{Pattern: "x"})
+	// context check and actually search — pinning down that ctx.Err()
+	// doesn't accidentally short-circuit every call, only genuinely
+	// cancelled ones.
+	dir := t.TempDir()
+	path := mustWriteTempFile(t, dir, "a.txt", "hello\n")
 
-	if code != ExitError {
-		t.Errorf("code = %d, want ExitError", code)
-	}
-	if err == nil {
-		t.Error("err = nil, want the not-yet-implemented stub error")
-	}
+	_, _, _, err := runCapture(t, Options{Pattern: "hello", Files: []string{path}})
 	if errors.Is(err, context.Canceled) {
 		t.Error("err should not be context.Canceled for a live context")
 	}

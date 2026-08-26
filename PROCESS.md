@@ -314,30 +314,43 @@ chasing feature parity or performance.
 
 ## 4. Build order (do these in sequence, commit/test at each step)
 
-1. **Scaffold**: `go mod init`, Cobra root command, `--version` wired to
+Status legend: ✅ done · 🚧 partially done · ⬜ not started.
+
+1. ✅ **Scaffold**: `go mod init`, Cobra root command, `--version` wired to
    build-time `ldflags`, empty `internal/grep.Run(opts) (exitCode int, err error)`.
-2. **Matcher interface + regex/fixed-string impls**, unit tests only
+2. ✅ **Matcher interface + regex/fixed-string impls**, unit tests only
    (no I/O yet): `Matcher.Find(line []byte) []MatchRange`.
-3. **`lineio` reader**: streaming line splitter over `io.Reader` handling
+3. ✅ **`lineio` reader**: streaming line splitter over `io.Reader` handling
    CRLF/LF/CR and no-trailing-newline, with table-driven tests using the
    Windows-correctness fixtures from §3.1 before touching any CLI code.
-4. **Wire MVP**: stdin + single file, `-i -v -n -c -F -l -L -q`, exit codes.
-   Add `test/e2e` invoking the built binary against `test/testdata`.
-5. **Walker**: recursive dir traversal + include/exclude globs, tested
+4. ✅ **Wire MVP**: stdin + single file, `-i -v -n -c -F -l -L -q`, exit codes.
+   Added `test/e2e` invoking the built binary against `test/testdata`.
+   Done together with steps 5 and 7 (below) in one wiring pass, once
+   §3's foundational packages (`matcher`/`lineio`/`encoding`/`walker`/
+   `source`/`termenv`) already existed and were independently tested —
+   the sequential order this list originally proposed turned out less
+   important than having those pieces solid first.
+5. ✅ **Walker**: recursive dir traversal + include/exclude globs, tested
    standalone against a synthetic directory tree (`t.TempDir()`), *then*
    wired into the CLI.
-6. **Context lines + `-o`/`-w`/`-x`/`-m`/`-e`/`-f`** in the printer/engine.
-7. **Color + terminal detection** (`internal/termenv`), default
-   `--color=auto` behavior verified on: Windows Terminal, redirected-to-
-   file, redirected-to-pipe (`gg pattern file | cat` should not emit
-   color codes).
-8. **Performance pass**: buffered I/O sizing, avoid per-line allocations
+6. 🚧 **`-o`/`-w`/`-x` done and wired. Context lines (`-A`/`-B`/`-C`) and
+   `-m`/`-e`/`-f` not started** — see README LIMITATIONS. Context lines
+   need a ring buffer of prior lines plus a post-match countdown;
+   `-e`/`-f` need the engine to support more than one `Pattern`. Both
+   are real scope, deliberately deferred rather than rushed.
+7. ✅ **Color + terminal detection** (`internal/termenv`), wired via
+   `internal/grep.resolveColor`. `--color=auto` verified for
+   redirected-to-file/pipe (correctly off); **real-console verification
+   (Windows Terminal vs. legacy conhost) is still an open manual-testing
+   item** — see README LIMITATIONS, same caveat as §3.3.
+8. ⬜ **Performance pass**: buffered I/O sizing, avoid per-line allocations
    in the hot path (reuse scanner buffers), add `go test -bench` targets
    over a generated large fixture; profile with `pprof` before optimizing
-   blindly.
-9. **Cross-platform pass**: run the full suite on Linux/macOS (CI matrix,
+   blindly. Not started — correctness came first, deliberately.
+9. ⬜ **Cross-platform pass**: run the full suite on Linux/macOS (CI matrix,
    §6), fix anything Windows-specific that leaked into shared code paths
-   (e.g., accidental `\r\n` assumptions).
+   (e.g., accidental `\r\n` assumptions). Not started; this repo has no
+   CI configured yet at all.
 10. **Packaging** (§7).
 
 Do not skip ahead to performance or Linux support before step 4 passes
