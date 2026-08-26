@@ -71,7 +71,8 @@ gg/
   internal/grep/            # core engine: orchestrates matcher+walker+reader+printer
   internal/matcher/         # Matcher interface: regex, fixed-string, word/line-anchored
   internal/walker/          # file/dir traversal, include/exclude glob filtering
-  internal/lineio/          # line-splitting reader: CRLF/LF/CR, encoding, binary detect
+  internal/lineio/          # line-splitting reader: CRLF/LF/CR, no-trailing-newline
+  internal/encoding/        # BOM detection/stripping, UTF-16->UTF-8 transcode, binary sniff
   internal/output/          # printer: plain/color, context buffering, filename prefixing
   internal/termenv/         # windows console mode (ANSI enable), isatty detection
   internal/testutil/        # golden-file helpers, oracle-comparison helpers
@@ -278,7 +279,8 @@ Fill in as choices are made; each row should reference the section above.
 | Decision | Choice | Section |
 |---|---|---|
 | Regex engine | Go `regexp` (RE2) only for v1? | §1 |
-| UTF-16 handling | detect+transcode vs. treat as binary | §3.2 |
+| UTF-16 handling | **Decided:** detect via BOM (LE/BE) and transcode to UTF-8 via `golang.org/x/text/encoding/unicode`, streaming (no whole-file read). No-BOM UTF-16 is undetectable by design (no reliable signature) and falls through to the plain NUL-byte binary heuristic — this is a known, accepted gap, not an oversight. `internal/encoding.Sniff`. | §3.2 |
+| Binary-detection heuristic | **Decided:** NUL byte anywhere in an 8000-byte prefix (mirrors Git's `buffer_is_binary`), skipped entirely (forced `Binary: false`) when a UTF-16 BOM was positively identified, since UTF-16 ASCII text is legitimately full of zero bytes. Detection only — the skip/`--text` *policy* is deferred to the engine wiring step. `internal/encoding.Sniff` | §3.2 |
 | Trailing newline emission | always `\n` vs. OS-native | §3.1 |
 | Symlink recursion default | follow / don't follow | §3.4 |
 | Color library | `x/term` + hand-rolled vs. `go-colorable`/`termenv` | §3.3 |

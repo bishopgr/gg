@@ -39,7 +39,7 @@ Legend: ✅ done + tested · 🚧 built, not wired in · ⬜ not started
 | CLI flags for matching (`-i -v -F -w -x -e -f ...`) | 🚧 | `matcher.Options` supports `-i`/`-F`/`-w`/`-x` already; no Cobra flags expose them yet |
 | Actual search execution (`gg PATTERN FILE` producing output) | ⬜ | `grep.Run` is a stub that always returns `(ExitError, "not yet implemented")` |
 | Line-splitting reader (CRLF/LF/CR, no-trailing-newline) | ✅ | `internal/lineio` — table + fuzz tested, **not yet reachable from the CLI** |
-| Encoding/BOM handling, binary-file detection | ⬜ | PROCESS.md §3.2 — separate concern, deliberately not in `lineio` |
+| Encoding/BOM detection, UTF-16 transcode, binary sniff | ✅ | `internal/encoding` — table + fuzz tested, **detection only, no skip/`--text` policy yet, not wired into the CLI** |
 | Recursive directory walk, `--include`/`--exclude` | ⬜ | `internal/walker` |
 | Output formatting (filename prefix, line numbers, context, color) | ⬜ | `internal/output` |
 
@@ -102,6 +102,7 @@ internal/grep/         composition root: Run(opts) (exitCode int, err error) [st
 internal/matcher/      pattern matching: fixed-string + regex, no I/O     [done]
 internal/buildinfo/    Version/Commit/Date via -ldflags                   [done]
 internal/lineio/       CRLF/LF/CR line splitting, streaming, no length cap [done]
+internal/encoding/     BOM detect/strip, UTF-16->UTF-8 transcode, binary sniff [done: detection]
 internal/walker/       file/dir traversal, include/exclude globs         [not started]
 internal/output/       printer: plain/color, context, filename prefixing [not started]
 internal/termenv/      Windows console-mode / isatty handling            [not started]
@@ -152,6 +153,42 @@ rationale.
   concatenating every line's `Text` + `Terminator.Bytes()` must
   reconstruct the original input exactly.
 
+### `internal/encoding` design (implemented — detection only)
+
+- `Sniff(io.Reader) (Result, io.Reader)` peeks at most 8000 leading
+  bytes (never slurps the file) to detect a byte-order mark and decide
+  whether the stream looks binary, returning a `Result` plus a `Reader`
+  picking up exactly where the original content does.
+- **UTF-8 BOM**: stripped, not transcoded (the bytes after it are
+  already UTF-8) — this is the classic bug PROCESS.md §3.2 calls out:
+  without stripping it, `^pattern` silently fails to anchor on line 1.
+- **UTF-16 LE/BE BOM**: detected and transcoded to UTF-8 streaming via
+  `golang.org/x/text/encoding/unicode` + `transform.NewReader` — chosen
+  over "treat UTF-16 as binary" specifically because this project is
+  Windows-first, and Windows PowerShell 5.1's default `Out-File`
+  encoding is UTF-16LE. No-BOM UTF-16 remains undetectable (no reliable
+  signature exists) and is an accepted, documented gap.
+- **Binary detection**: a NUL byte anywhere in the (BOM-stripped) 8000-byte
+  prefix marks a stream binary — mirrors Git's `buffer_is_binary`
+  heuristic. Critically, this check is **skipped entirely** (forced
+  `false`) when a UTF-16 BOM was positively identified: UTF-16-encoded
+  ASCII text is legitimately full of zero bytes (every character has a
+  zero high or low byte), so applying the naive heuristic there would
+  flag nearly all UTF-16 text as binary. This was caught and fixed
+  during test-writing, not assumed correct up front — see
+  `TestSniff_UTF16LE_TranscodesAndIsNotFlaggedBinary`.
+- **Detection only, no policy**: `Sniff` reports `Result.Binary`; it does
+  not skip the file or print `Binary file X matches` — that decision
+  needs to know about `-a`/`--text`/`-I`, which belong to the not-yet-built
+  `grep` engine, not this package.
+- Proven to compose with `lineio` as intended
+  (`TestSniffThenLineio`): a UTF-16LE file with CRLF line endings splits
+  into the same lines a plain UTF-8/LF file would.
+- Fuzzed (`FuzzSniff`, ~2.2M executions): for the non-UTF-16 path,
+  asserts byte-exact reconstruction after BOM-stripping; for the UTF-16
+  path, asserts only "never panics, decode errors are the worst case"
+  since arbitrary fuzz bytes aren't guaranteed valid UTF-16.
+
 ## BUILDING
 
 ```powershell
@@ -180,6 +217,12 @@ go test ./...
   combination (including adjacent/degenerate cases like `"\r\r\n"`), the
   `test/testdata/` fixtures above, an arbitrarily-long-line test, and a
   byte-perfect round-trip fuzz target (~1.3M executions, zero mismatches).
+- `internal/encoding` has table-driven tests for BOM detection, UTF-8 BOM
+  stripping, UTF-16 LE/BE transcoding (including non-ASCII content,
+  generated via the real `x/text` encoder so fixtures can't be
+  hand-assembled wrong), the binary/UTF-16 interaction edge case above,
+  an integration test proving composition with `lineio`, and a fuzz
+  target (~2.2M executions, zero crashes).
 - `go test -race` currently fails **locally** on this machine with
   `0xc0000139` — that's an incompatible `gcc` (Strawberry Perl's, found
   first on `PATH`) rather than a code issue; GitHub Actions'
@@ -191,11 +234,14 @@ go test ./...
 - Does not yet search anything — `gg PATTERN FILE` exits `2`.
 - No recursive directory search, no globbing, no color output.
 - No PCRE (backreferences/lookaround); RE2 syntax only.
-- No encoding detection yet (UTF-8 BOM stripping, UTF-16, binary-file
-  detection — PROCESS.md §3.2). `lineio.Reader` treats all input as raw
-  bytes; a UTF-8 BOM would currently show up as leading garbage on the
-  first line's `Text`, and a UTF-16 file would read as (mostly) blank
-  lines full of NUL bytes. Both are the next step, not yet started.
+- Encoding/BOM/binary *detection* exists (`internal/encoding.Sniff`) but
+  isn't wired to anything yet — no code calls it before opening a file.
+  There is also no *policy* built on top of it yet: nothing skips binary
+  files or prints `Binary file X matches`, and there's no `-a`/`--text`/
+  `-I` flag to control that once it exists.
+- No-BOM UTF-16 is undetectable by design (no reliable signature) and
+  will be read as (mostly) NUL-heavy garbage text — an accepted,
+  documented gap, not a bug to chase.
 
 ## SEE ALSO
 
