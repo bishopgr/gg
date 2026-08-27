@@ -27,8 +27,21 @@ const (
 
 // Options captures the parsed CLI flags for a single invocation.
 type Options struct {
-	// Pattern is the search expression (regex, or literal when Fixed is set).
-	Pattern string
+	// Patterns is the list of search expressions to match, OR'd
+	// together — see matcher.Options.Patterns's doc comment. The
+	// ordinary single-PATTERN case is a one-element slice; multiple
+	// entries come from -e/-f (internal/cli resolves the "positional
+	// PATTERN vs. -e/-f" precedence before constructing Options — see
+	// PatternFiles below for the other half of that). An empty slice is
+	// valid and matches nothing, matching real GNU grep's -e/-f
+	// behavior for zero supplied patterns.
+	Patterns []string
+	// PatternFiles are -f FILE arguments: each file's lines are read
+	// and appended to Patterns (in file-then-line order, after every
+	// literal Patterns entry) before matching begins — see
+	// resolvePatterns. "-" means stdin, the same convention every other
+	// FILE argument follows.
+	PatternFiles []string
 	// Files are the paths to search; empty means read stdin. "-" among
 	// Files also means stdin, matching the conventional meaning every
 	// Unix-heritage tool gives it.
@@ -42,15 +55,29 @@ type Options struct {
 	LineRegexp  bool // -x
 
 	// Output shaping.
-	LineNumber        bool      // -n
-	OnlyMatching      bool      // -o
-	Count             bool      // -c
-	FilesWithMatches  bool      // -l
-	FilesWithoutMatch bool      // -L
-	Quiet             bool      // -q
-	NoFilename        bool      // -h
-	WithFilename      bool      // -H
-	Color             ColorMode // --color
+	LineNumber        bool       // -n
+	OnlyMatching      bool       // -o
+	Count             bool       // -c
+	FilesWithMatches  bool       // -l
+	FilesWithoutMatch bool       // -L
+	Quiet             bool       // -q
+	NoFilename        bool       // -h
+	WithFilename      bool       // -H
+	Color             ColorMode  // --color
+	Binary            BinaryMode // -a/--text or -I
+
+	// Context lines (-A/-B/-C). ContextEnabled is deliberately separate
+	// from "ContextBefore > 0 || ContextAfter > 0": GNU grep's own
+	// behavior (verified directly against it, not assumed) is that
+	// explicitly passing e.g. -A0 or -C0 still turns on "--" group
+	// separators between non-adjacent matches, even though zero actual
+	// context lines get printed — that's observably different from not
+	// passing any context flag at all, which never prints separators.
+	// internal/cli sets this from whether -A/-B/-C was present on the
+	// command line, not from the resolved values.
+	ContextEnabled bool // true if -A, -B, or -C was given at all
+	ContextBefore  int  // -B (or -C, if -B wasn't given explicitly)
+	ContextAfter   int  // -A (or -C, if -A wasn't given explicitly)
 
 	// Directory traversal — see walker.Options for what each does.
 	Recursive      bool // -r or -R
@@ -99,8 +126,13 @@ func Run(ctx context.Context, opts Options) (int, error) {
 		stderr = os.Stderr
 	}
 
+	patterns, err := resolvePatterns(opts.Patterns, opts.PatternFiles)
+	if err != nil {
+		return ExitError, err
+	}
+
 	m, err := matcher.New(matcher.Options{
-		Pattern:    opts.Pattern,
+		Patterns:   patterns,
 		Fixed:      opts.Fixed,
 		IgnoreCase: opts.IgnoreCase,
 		WordRegexp: opts.WordRegexp,
@@ -148,6 +180,9 @@ func Run(ctx context.Context, opts Options) (int, error) {
 		mode:    selectMode(opts),
 		printer: printer,
 		stderr:  stderr,
+	}
+	if opts.ContextEnabled {
+		eng.context = newContextTracker(opts.ContextBefore, opts.ContextAfter)
 	}
 
 	for _, root := range roots {

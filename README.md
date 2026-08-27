@@ -180,6 +180,58 @@ src\main.go:3:// TODO: add graceful shutdown
 src\util\util.go:3:// TODO: replace with a real implementation
 ```
 
+Show the lines immediately surrounding each match (`-C`, context on both
+sides) — here the two matches are close enough that their context
+windows overlap, so they merge into one continuous block with no `--`
+separator, and shared lines aren't duplicated:
+
+```powershell
+PS> gg -C 1 -n ERROR app.log
+2-2024-01-01T10:00:01 WARN  cache miss for key=42
+3:2024-01-01T10:00:02 ERROR failed to connect to db: timeout
+4-2024-01-01T10:00:03 INFO  retrying connection
+5:2024-01-01T10:00:04 ERROR failed to connect to db: timeout
+6-2024-01-01T10:00:05 INFO  connected
+```
+
+Non-adjacent matches, by contrast, get a `--` separator between their
+groups — here with `-A0`, which prints zero actual context lines but
+still separates the two matches (this is deliberate, GNU-grep-compatible
+behavior; a bare `-A`/`-B`/`-C` with no context flag at all never prints
+separators — see OPTIONS):
+
+```powershell
+PS> gg -A0 -n ERROR app.log
+3:2024-01-01T10:00:02 ERROR failed to connect to db: timeout
+--
+5:2024-01-01T10:00:04 ERROR failed to connect to db: timeout
+```
+
+Search for several patterns at once, kept in a file instead of the
+command line (`-f`) — useful for a reusable list like log severities to
+flag:
+
+```powershell
+PS> Get-Content levels.txt
+ERROR
+WARN
+PS> gg -n -f levels.txt app.log
+2:2024-01-01T10:00:01 WARN  cache miss for key=42
+3:2024-01-01T10:00:02 ERROR failed to connect to db: timeout
+5:2024-01-01T10:00:04 ERROR failed to connect to db: timeout
+```
+
+The same search inline with repeated `-e` instead of a file — once `-e`
+(or `-f`) is used at all, every positional argument becomes a `FILE`,
+never a second pattern, so this needs no other special syntax:
+
+```powershell
+PS> gg -e ERROR -e WARN -n app.log
+2:2024-01-01T10:00:01 WARN  cache miss for key=42
+3:2024-01-01T10:00:02 ERROR failed to connect to db: timeout
+5:2024-01-01T10:00:04 ERROR failed to connect to db: timeout
+```
+
 Anchor a whole-line match (`-x`), e.g. to assert a file's first line is
 *exactly* `package main` and nothing else on that line:
 
@@ -215,6 +267,30 @@ PS> gg --color=always -n ERROR app.log
 Markdown can't render the ANSI escape codes gg emits, but they're
 really there; see `internal/output`.)
 
+Search a binary file as if it were text (`-a`), instead of getting the
+default `Binary file X matches` message — here `data.bin` contains raw
+NUL-separated records:
+
+```powershell
+PS> gg field data.bin
+Binary file data.bin matches
+PS> gg -a field data.bin
+record1 field=42
+record2 field=99
+```
+
+(The embedded NUL bytes are real and preserved byte-for-byte in the
+output — they just render as blank space in a terminal/Markdown.) Or go
+the other way and skip binary files entirely with `-I`, as if they had
+no matches at all — useful when recursively grepping a directory that
+might contain build artifacts or other binary junk you never want
+touched:
+
+```powershell
+PS> gg -I field data.bin; $LASTEXITCODE
+1
+```
+
 ## STATUS
 
 Legend: ✅ done + tested · 🚧 built, not wired in · ⬜ not started
@@ -229,11 +305,13 @@ Legend: ✅ done + tested · 🚧 built, not wired in · ⬜ not started
 | Build-time version metadata (`-ldflags`) | ✅ | `internal/buildinfo` + `scripts/build.ps1` |
 | Matching engine (regex + fixed-string, `-i`/`-F`/`-w`/`-x`/`-v`) | ✅ | `internal/matcher`, wired into `grep.Run` |
 | Line-splitting (CRLF/LF/CR, no-trailing-newline) | ✅ | `internal/lineio`, wired into `grep.Run` |
-| Encoding/BOM detection, UTF-16 transcode, binary-match message | ✅ | `internal/encoding`, wired into `grep.Run`; no `-a`/`--text`/`-I` flag yet (see LIMITATIONS) |
+| Encoding/BOM detection, UTF-16 transcode, binary-match message, `-a`/`--text`/`-I` | ✅ | `internal/encoding` detects, `internal/grep`'s `BinaryMode` decides policy, wired into `grep.Run` — see OPTIONS below |
 | Recursive directory walk, glob expansion, `--include`/`--exclude`/`--exclude-dir` | ✅ | `internal/walker`, wired into `grep.Run` |
 | Terminal detection, Windows ANSI enabling, `--color` | ✅ | `internal/termenv` + `grep.resolveColor`, wired into `grep.Run` |
 | Output formatting (filename prefix, line numbers, `-o`, `-c`, `-l`/`-L`, color) | ✅ | `internal/output`, wired into `grep.Run` |
-| Context lines (`-A`/`-B`/`-C`), multi-pattern (`-e`/`-f`), `-m`, `-z`, PCRE | ⬜ | Explicit non-goals for now — see LIMITATIONS |
+| Context lines (`-A`/`-B`/`-C`) | ✅ | `internal/grep`'s `contextTracker`, wired into `grep.Run`; every group/separator/precedence rule verified directly against real GNU grep — see OPTIONS below |
+| Multi-pattern (`-e`/`-f`) | ✅ | `internal/grep`'s `resolvePatterns` + `matcher`'s alternation-joining, wired into `grep.Run`; precedence/combination rules verified directly against real GNU grep — see OPTIONS below |
+| `-m`, `-z`, PCRE | ⬜ | Explicit non-goals for now — see LIMITATIONS |
 | Black-box e2e tests against the real compiled binary | ✅ | `test/e2e` |
 
 ## OPTIONS
@@ -261,10 +339,14 @@ Legend: ✅ done + tested · 🚧 built, not wired in · ⬜ not started
 | `--exclude=GLOB` | skip files matching `GLOB` when recursing | ✅ |
 | `--exclude-dir=GLOB` | don't descend into directories matching `GLOB` | ✅ |
 | `--color[=auto\|always\|never]` | highlight matches; bare `--color` means `always` | ✅ |
-| `-A`, `-B`, `-C NUM` | print lines of context | ⬜ planned |
-| `-e PATTERN`, `-f FILE` | additional/file-sourced patterns | ⬜ planned |
+| `-A NUM`, `--after-context=NUM` | print `NUM` lines of trailing context after each match | ✅ |
+| `-B NUM`, `--before-context=NUM` | print `NUM` lines of leading context before each match | ✅ |
+| `-C NUM`, `--context=NUM` | print `NUM` lines of context on both sides (like `-A NUM -B NUM`, unless `-A`/`-B` is *also* given — see note below) | ✅ |
+| `-e PATTERN`, `--regexp=PATTERN` | add `PATTERN` to the list of patterns to match (may be repeated) | ✅ |
+| `-f FILE`, `--file=FILE` | add patterns from `FILE`, one per line (may be repeated; `-` means stdin) | ✅ |
 | `-m NUM` | stop after `NUM` matches | ⬜ planned |
-| `-a`, `--text`, `-I` | force text mode / skip binary files entirely | ⬜ planned (binary files currently always print the `Binary file X matches` message, never raw lines, never skipped) |
+| `-a`, `--text` | treat binary files as text (raw content, not the `Binary file X matches` message) | ✅ |
+| `-I`, `--skip-binary` | skip binary files entirely, as if they had no matches (`--skip-binary` is gg's own long name — GNU grep's own `-I` has none) | ✅ |
 | `-z` | NUL-separated input/output | ⬜ planned |
 | `-P` (PCRE) | Perl-compatible regex | ⬜ non-goal — RE2 syntax only (PROCESS.md §1) |
 
@@ -275,6 +357,55 @@ Cobra's defaults; see the doc comment on `registerFlags` in
 `internal/cli/root.go` for exactly how (it needed two different
 workarounds for two asymmetric Cobra behaviors, verified against
 Cobra's source, not assumed).
+
+**`-A`/`-B`/`-C` precedence**: an explicitly-given `-A` or `-B` always
+wins for its own direction over `-C`, regardless of the order the flags
+appear — `gg -A 1 -C 3` and `gg -C 3 -A 1` both resolve to `after=1,
+before=3`, not "whichever flag comes last wins." Verified directly
+against real GNU grep rather than assumed, since it's genuinely
+counter-intuitive for a typical flag-parsing library's default
+last-one-wins behavior (see `internal/cli/root.go`'s `RunE` for exactly
+how). Also verified and replicated: explicitly passing `-A0`/`-B0`/`-C0`
+still turns on `--` group separators between non-adjacent matches, even
+though zero actual context lines get printed — that's genuinely
+different, observable output from not passing any context flag at all
+(`internal/grep`'s `Options.ContextEnabled` exists specifically to carry
+that distinction). GNU grep's `-NUM` shorthand for `-C NUM` (e.g. `grep
+-3 pattern file`) is **not** implemented — see LIMITATIONS.
+
+**`-e`/`-f` precedence**: once *either* is given, the positional
+`PATTERN` argument disappears entirely — every remaining positional
+argument becomes a `FILE` instead, even one that "looks like" it was
+meant as a pattern (`gg -e foo bar file` searches `bar` and `file` as
+files, it does not also match against `bar`). Verified directly against
+real GNU grep, not assumed. Patterns from `-e` and `-f` combine in a
+simple, documented order — every `-e` pattern first (in the order
+given), then every `-f` file's lines (files in the order given, lines in
+file order) — rather than attempting exact command-line interleaving
+between the two flags, since regex alternation doesn't make that
+distinction observable anyway. A blank line in a `-f` file becomes a
+literal empty-string pattern (matches every line), exactly like `-e ""`
+— verified, not skipped. Supplying **zero** patterns total (e.g. an
+empty `-f` file and no `-e` at all) makes the search match *nothing*,
+not *everything* — also verified directly against real GNU grep, and the
+opposite of what compiling an actually-empty regex would do.
+
+**`-a`/`-I` behavior and precedence**: `-a`/`--text` treats a binary-
+detected file exactly like text — matching, `-A`/`-B`/`-C` context
+lines, `-v`, and normal output all behave as if the file were never
+flagged binary, raw NUL bytes and all. `-I` treats a binary-detected
+file as if it produced **no matches at all**, without reading any
+further: `-c` reports `0` for it, `-l` never lists it, `-L` always does
+— but (verified directly against real GNU grep, and the subject of a
+real bug found and fixed while implementing this — see PROCESS.md §8)
+`-L` listing it does **not** mean the overall exit code is "match found"
+— that always reflects whether the pattern matched *some* line in
+*some* file, identically to plain grep, regardless of what `-l`/`-L`
+itself printed. If both `-a` and `-I` are given, gg always has `-I` win
+— a deliberately simpler, documented rule than real GNU grep's true
+command-line-order last-one-wins behavior, which would require
+inspecting raw argument order for a combination unlikely to ever be
+given deliberately.
 
 Full phased rollout this table tracks:
 [PROCESS.md §1](PROCESS.md#1-decide-the-feature-surface-write-this-down-before-coding).
@@ -359,6 +490,75 @@ for the full rationale.
   garbage) line content — there is no `-a`/`--text`/`-I` flag yet to
   override this, which is an explicit, stated gap (see LIMITATIONS),
   not a silent one.
+- **Context lines (`-A`/`-B`/`-C`)** are handled by a dedicated
+  `contextTracker` (`internal/grep/context.go`) implementing GNU grep's
+  own streaming algorithm: a capped ring buffer of the most recent
+  non-selected lines (leading-context candidates) plus a trailing-
+  context countdown, so no whole-file buffering is needed regardless of
+  `-A`/`-B` size. It is deliberately **one instance shared across every
+  file** a run searches (reset per-file via `startFile`, but its
+  "has anything ever been printed" flag is not) because real GNU grep's
+  `--` group separator fires between two different files' output too,
+  not just between two groups within one file — verified directly
+  against it, not assumed, and regression-tested
+  (`TestRun_Context_SeparatorBetweenDifferentFiles`). Every other
+  behavioral rule here — merge-without-separator when context windows
+  overlap, `-A0`/`-C0` still enabling separators despite printing zero
+  context text, `-o` keeping the separator but dropping context line
+  text, `-v` letting an excluded-because-it-matched line resurface as a
+  highlighted context line — was independently verified against real
+  GNU grep (Git for Windows' `grep.exe`) rather than derived from the
+  man page; see the commit introducing this feature for the full
+  transcript.
+- **Multi-pattern (`-e`/`-f`)**: `resolvePatterns`
+  (`internal/grep/patterns.go`) is a small pre-processing step `Run`
+  calls before `matcher.New`, combining literal patterns (`-e`, or the
+  positional `PATTERN`) with every `-f` file's lines, in that order.
+  Pattern files are read via `internal/source.Open` +
+  `internal/lineio.NewReader` — the exact same Windows-correct opening
+  and CRLF/LF/CR-safe line splitting used for files being *searched* —
+  rather than a second, less careful line-splitting implementation, and
+  `-f -` means stdin for the same reason every other `FILE` argument
+  does. A pattern file that can't be opened or read is a **fatal**,
+  once-returned error (like an invalid regex), not a per-search-file
+  diagnostic — with no readable pattern list there's nothing left to
+  search with. `internal/cli` resolves the "positional `PATTERN` vs.
+  `-e`/`-f`" precedence (once either flag is given, *every* positional
+  argument becomes a `FILE`, verified directly against real GNU grep)
+  before `Options` is even constructed, so this package only ever sees
+  an already-decided, unambiguous pattern list.
+- **Binary file handling (`-a`/`--text`/`-I`)**: `Options.Binary`
+  (`BinaryMode`, `internal/grep/binary.go`) is checked once per file,
+  right after `encoding.Sniff`, against two independently-derived facts:
+  `asText` (treat the file as text — true whenever it isn't actually
+  binary, or `-a` says to pretend it isn't) gates both context-line
+  tracking and per-line printing; `skipBinary` (true only for `-I` on an
+  actually-binary file) skips the entire per-line loop outright, leaving
+  `matched`/`count` at their zero values so every mode's ordinary
+  end-of-function bookkeeping produces the right output *and* exit-code
+  contribution for free, without per-mode special-casing. Every
+  resulting behavior — `-a` composing normally with `-C`/`-v` (raw NUL
+  bytes and all), `-I` reporting `0` under `-c`, never listing under
+  `-l`, always listing under `-L`, and `-v` making no difference once a
+  file is skipped — was verified directly against real GNU grep, not
+  assumed. `-I` winning when both `-a` and `-I` are given is a
+  deliberately simpler, documented gg-specific rule, not an attempt at
+  real grep's true command-line-order precedence there (see LIMITATIONS).
+- **Real bug found and fixed while verifying `-I`+`-L` against real GNU
+  grep**: `-l`/`-L`'s exit code must always reflect raw per-file
+  matching — identical to plain grep's own criterion — completely
+  independent of which filenames `-l`/`-L` itself prints. A prior
+  version of this code set the exit-code flag from `-L`'s own *printing*
+  criterion (`!matched`) instead, which happens to look plausible for
+  the single scenario it was manually checked against (every file
+  matches → prints nothing → "should" exit no-match) but is
+  demonstrably wrong against real grep in general (e.g. two files where
+  only one matches: `-L` prints only the non-matching one, yet the
+  correct exit code is still "matched," since something, somewhere, did)
+  — see PROCESS.md §8 and `run_test.go`'s
+  `TestRun_FilesWithoutMatch_ExitCodeReflectsRawMatching` for the full
+  oracle-verified matrix, and `OUTPUT.md`'s FINDINGS section for the
+  original incorrect narrative and its correction.
 
 ### `internal/output` design (implemented)
 
@@ -382,6 +582,13 @@ for the full rationale.
   with `-v` prints nothing for those lines — both match GNU grep's own
   behavior for this combination and are explicitly tested, not just
   incidentally correct.
+- `PrintContextLine`/`PrintContextSeparator` extend the same contract
+  for `-A`/`-B`/`-C`: a `-` prefix separator instead of `:` for context
+  lines, still capable of highlighting a context line's own literal
+  matches (relevant under `-v`), and both silently no-op the context
+  *text* under `-o` while still emitting the group separator — decisions
+  `internal/grep`'s `contextTracker` makes, not this package; `Printer`
+  just renders what it's told.
 
 ### `internal/matcher` design (implemented)
 
@@ -398,6 +605,23 @@ for the full rationale.
   implementations (zero-width matches at every rune boundary).
 - **RE2, not PCRE**: no backreferences, no lookaround. This is a stated
   non-goal for v1 (PROCESS.md §1), not an oversight.
+- **Multi-pattern (`-e`/`-f`)**: `Options.Patterns` is a slice, not a
+  single string. Multiple entries are combined into one alternation
+  (each escaped with `regexp.QuoteMeta` first when `-F` is set, so every
+  pattern in the list is still literal, not just the first) and compiled
+  as a **single** regexp, rather than running one matcher per pattern
+  per line — this both avoids needing to merge match ranges from
+  several independent matchers into `Matcher`'s required ascending/
+  non-overlapping order, and lets one `-x`/`-w`/`-i` wrap apply to the
+  whole alternation at once, exactly like real grep does. Each pattern
+  is validated with its own `regexp.Compile` call first, purely so a bad
+  pattern among several is reported by *itself* (`compileError`) rather
+  than as an unreadable fragment of the final joined expression. An
+  **empty** `Patterns` slice is a deliberate, valid input — `New`
+  returns a `neverMatcher` that matches nothing, rather than compiling
+  an empty-string pattern (which would zero-width-match every line
+  instead) — verified directly against real GNU grep's own behavior for
+  `-e`/`-f` supplying zero patterns between them, not assumed.
 
 ### `internal/lineio` design (implemented)
 
@@ -458,8 +682,10 @@ for the full rationale.
   `TestSniff_UTF16LE_TranscodesAndIsNotFlaggedBinary`.
 - **Detection only, no policy**: `Sniff` reports `Result.Binary`; it does
   not skip the file or print `Binary file X matches` — that decision
-  needs to know about `-a`/`--text`/`-I`, which belong to the not-yet-built
-  `grep` engine, not this package.
+  belongs to `internal/grep`'s `BinaryMode` (`-a`/`--text`/`-I`), not
+  this package. `Sniff` itself is completely unchanged by those flags;
+  they only affect how `internal/grep.searchReader` reacts to the
+  `Result.Binary` fact it already reports.
 - Proven to compose with `lineio` as intended
   (`TestSniffThenLineio`): a UTF-16LE file with CRLF line endings splits
   into the same lines a plain UTF-8/LF file would.
@@ -608,7 +834,11 @@ go test ./...
   a cross-validation test asserting `fixedMatcher` and
   `regexMatcher(QuoteMeta(pattern))` agree wherever their behavior is
   supposed to overlap, and a fuzz target (`FuzzNew`) exercised for
-  ~1M generated executions with zero panics.
+  ~1M generated executions with zero panics. Multi-pattern (`-e`/`-f`)
+  support adds its own cases: OR'd-together matching, `-F`/`-x`/`-w`
+  each applying to every pattern in the list (not just the first), an
+  invalid pattern among several being attributed to *that* pattern in
+  the error message, and the empty-`Patterns`-never-matches case.
 - `internal/lineio` has table-driven tests covering every terminator
   combination (including adjacent/degenerate cases like `"\r\r\n"`), the
   `test/testdata/` fixtures above, an arbitrarily-long-line test, and a
@@ -638,18 +868,41 @@ go test ./...
   (filename/line-number prefixes, color on/off, `-o`'s one-match-per-line
   behavior including with color and with filename/line-number, `-v`'s
   no-ranges-to-highlight case, `-c`/`-l`/`-L`/binary-match message
-  shapes) and confirms buffering requires an explicit `Flush`.
-- `internal/grep` has ~40 tests covering the actual end-to-end wiring
+  shapes) and confirms buffering requires an explicit `Flush`, plus
+  `PrintContextLine`/`PrintContextSeparator` coverage: the `-` vs `:`
+  prefix distinction, highlighting a context line's own ranges, and
+  `-o` suppressing context text while still allowing the separator.
+- `internal/grep` has ~78 tests covering the actual end-to-end wiring
   against real temp files: basic match/no-match, every matching flag
   (`-i`/`-F`/`-w`/`-x`/`-v`), every output-shape flag (`-n`/`-o`/`-c`/
   `-l`/`-L`/`-q` including the quiet-mode early-stop-before-reaching-a-
   broken-file case), filename-prefix policy (`-H`/`-h`/single-vs-multi-file),
   recursive search with `--include`/`--exclude`, glob expansion, stdin
   (both as the default and as an explicit `"-"` mixed with real files),
-  `--color` resolution against both a forced and a non-file writer, and
-  the binary-file-match-message path — plus the fatal-vs-per-file error
-  split (`internal/grep`'s central design decision) and context
-  cancellation.
+  `--color` resolution against both a forced and a non-file writer, the
+  binary-file-match-message path, and Go `context.Context` cancellation
+  — plus the fatal-vs-per-file error split (`internal/grep`'s central
+  design decision). `-A`/`-B`/`-C` context lines specifically have their
+  own dedicated table (`context_test.go`, ~15 cases, every one of them
+  cross-checked against real GNU grep's actual output rather than
+  assumed): before-only, after-only, before+after merging when windows
+  overlap, the `-` vs `:` prefix split, `-A0`/`-C0` still enabling
+  separators, `-v` surfacing an excluded match as highlighted context,
+  `-o` dropping context text but keeping the separator, and that
+  `-c`/`-q`/`-l` remain completely unaffected by context flags.
+  `-e`/`-f` multi-pattern support similarly has its own dedicated table
+  (`patterns_test.go`, covering `resolvePatterns` directly) plus
+  end-to-end `Run` tests: literal-then-file combination order, blank
+  lines becoming empty patterns, CRLF pattern files, a missing pattern
+  file being a fatal returned error (not a per-file diagnostic), and the
+  empty-pattern-list-matches-nothing case, end to end. `-a`/`-I` add
+  their own set: `-a` composing normally with `-C`/`-v` against raw NUL
+  bytes, `-I` reporting `0` under `-c`/never listing under `-l`/always
+  listing under `-L`/making no difference under `-v`, and `-I` not
+  affecting other files in the same multi-file run — plus the corrected
+  `-l`/`-L` exit-code matrix
+  (`TestRun_FilesWithoutMatch_ExitCodeReflectsRawMatching`) from the real
+  bug found while verifying `-I`+`-L` (see PROCESS.md §8 and `OUTPUT.md`).
 - `internal/cli` has tests for the exit-code contract (`--version`/
   `--help`/no-args, and — via a swappable `runGrep` seam — all three of
   `ExitMatch`/`ExitNoMatch`/`ExitError` from a fake engine),
@@ -657,13 +910,23 @@ go test ./...
   reassignment (proven by checking the fake engine actually gets called
   instead of Cobra short-circuiting into help/version), `--color`'s
   GNU-style optional-value parsing (bare/`=always`/`=never`/`=auto`),
-  and the `-l`/`-L` and `-h`/`-H` mutual-exclusion checks.
+  the `-l`/`-L` and `-h`/`-H` mutual-exclusion checks, `-e`/`-f`'s
+  precedence rule specifically (a positional argument becoming a `FILE`,
+  never a second pattern, once `-e`/`-f` is given, and zero positional
+  arguments being valid in that case even though a bare `PATTERN` is
+  still mandatory without them), and `-a`/`-I`'s flag wiring including
+  gg's own "`-I` always wins if both are given" precedence rule.
 - `test/e2e` builds the real `gg` binary once (`TestMain`) and drives it
   as a subprocess for the scenarios only a real process boundary can
   validate: actual exit codes, actual stdio redirection, that `-h`/`-v`
   truly don't trigger Cobra's help/version machinery, that recursive
-  search really does emit backslash-separated paths on Windows, and
-  that real stdout output never contains a stray `\r` byte.
+  search really does emit backslash-separated paths on Windows, that
+  real stdout output never contains a stray `\r` byte, `-A`/`-B`/`-C`
+  context lines (including the precedence and explicit-zero cases),
+  `-e`/`-f` multi-pattern behavior (including the positional-arg-becomes-
+  a-FILE precedence rule and a missing pattern file's diagnostic),
+  `-a`/`-I` binary handling, and the corrected `-l`/`-L` exit-code
+  behavior against real files (not just the binary-skip interaction).
 - **Benchmarks** (PROCESS.md §4 step 8): `go test -bench . -benchmem
   ./internal/lineio/... ./internal/matcher/... ./internal/grep/...`
   covers the line-splitting hot path (LF/CRLF/bare-CR, plus the
@@ -682,19 +945,21 @@ go test ./...
 
 Everything below is a genuine, deliberate gap — not a hidden one.
 
-- **No context lines** (`-A`/`-B`/`-C`) — needs a ring buffer of prior
-  lines plus a post-match countdown; explicitly deferred rather than
-  half-implemented.
-- **No `-e PATTERN` / `-f FILE`** (multiple/file-sourced patterns) — the
-  engine takes exactly one `Pattern` string today.
+- **No `-NUM` shorthand for `-C NUM`** (e.g. GNU grep's `grep -3 pattern
+  file`) — would need pre-processing raw args before Cobra/pflag parses
+  them (pflag has no concept of a bare-numeric flag), and risks
+  misinterpreting a pattern argument that itself starts with a digit
+  after a dash; deferred rather than hacked in, unlike `-A`/`-B`/`-C`
+  themselves, which are fully implemented (see OPTIONS).
 - **No `-m NUM`** (stop after N matches per file) or **`-z`**
   (NUL-separated records).
 - **No PCRE** (`-P`): Go's `regexp` is RE2 — no backreferences, no
   lookaround. Stated non-goal for v1 (PROCESS.md §1), not an oversight.
-- **Binary files always print the `Binary file X matches` message**,
-  never raw line content, with no way to override it yet — there's no
-  `-a`/`--text`/`-I` flag. This is a real, if narrow, behavior gap: you
-  cannot currently force gg to search a binary file as text.
+- **No exact command-line-order precedence between `-a` and `-I`** when
+  both are given — gg always lets `-I` win, a simpler documented rule
+  than real GNU grep's true last-flag-wins behavior. Deferred rather
+  than tracking raw argument order for a combination unlikely to ever be
+  given deliberately.
 - **No-BOM UTF-16 is undetectable by design** (no reliable signature)
   and reads as mostly NUL-heavy garbage text — an accepted, documented
   gap (PROCESS.md §3.2), not a bug to chase.

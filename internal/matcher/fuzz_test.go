@@ -29,7 +29,7 @@ func FuzzNew(f *testing.F) {
 
 	f.Fuzz(func(t *testing.T, pattern, line string, fixed, ignoreCase, wordRegexp, lineRegexp bool) {
 		m, err := New(Options{
-			Pattern:    pattern,
+			Patterns:   []string{pattern},
 			Fixed:      fixed,
 			IgnoreCase: ignoreCase,
 			WordRegexp: wordRegexp,
